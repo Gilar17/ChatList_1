@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -29,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 import models as model_service
+from markdown_viewer import format_received_at, show_response_markdown
 
 
 class PromptEditDialog(QDialog):
@@ -415,38 +417,6 @@ class ModelsDialog(QDialog):
         self.reload()
 
 
-class ResultViewDialog(QDialog):
-    """Окно просмотра полного текста ответа."""
-
-    def __init__(self, result: model_service.ResultRecord, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"Ответ: {result.model_name}")
-        self.resize(700, 500)
-
-        info_label = QLabel(f"Промт: {result.prompt_text.replace(chr(10), ' ')[:120]}")
-        info_label.setWordWrap(True)
-        info_label.setFont(QFont("Segoe UI", 9))
-
-        response_view = QTextEdit()
-        response_view.setReadOnly(True)
-        response_view.setFont(QFont("Segoe UI", 10))
-        response_view.setPlainText(result.response_text)
-        response_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-
-        close_button = QPushButton("Закрыть")
-        close_button.clicked.connect(self.accept)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        buttons.addWidget(close_button)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.addWidget(info_label)
-        layout.addWidget(response_view, stretch=1)
-        layout.addLayout(buttons)
-
-
 class ResultsDialog(QDialog):
     SORT_OPTIONS = {
         "Дата создания": ("saved_at", "DESC"),
@@ -455,10 +425,11 @@ class ResultsDialog(QDialog):
     }
 
     ROW_HEIGHT = 140
-    COL_ID_WIDTH = 58
-    COL_MODEL_WIDTH = 165
+    COL_ID_WIDTH = 60
     COL_DATE_WIDTH = 160
-    COL_PROMPT_RATIO = 0.34
+    COL_PROMPT_RATIO = 0.30
+    COL_MODEL_RATIO = 0.20
+    COL_ANSWER_RATIO = 0.50
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -468,6 +439,10 @@ class ResultsDialog(QDialog):
         search_label = QLabel("Поиск:")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск по промту, модели, ответу или тегам...")
+        self.search_input.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self.search_input.textChanged.connect(self.reload)
 
         sort_label = QLabel("Сортировать по:")
@@ -481,31 +456,42 @@ class ResultsDialog(QDialog):
         top_row.addWidget(sort_label)
         top_row.addWidget(self.sort_combo)
 
-        self.table = QTableWidget(0, 5)
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["ID", "Промт", "Модель", "Ответ", "Дата"])
         header = self.table.horizontalHeader()
-        for column in range(5):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, self.COL_ID_WIDTH)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(4, self.COL_DATE_WIDTH)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.table.cellDoubleClicked.connect(self.on_view_result)
+        self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
         self.table.verticalHeader().setVisible(False)
 
         self.export_md_button = QPushButton("Экспорт в Markdown")
         self.export_json_button = QPushButton("Экспорт в JSON")
+        self.open_button = QPushButton("Открыть")
         self.delete_button = QPushButton("Удалить")
         self.close_button = QPushButton("Закрыть")
 
         self.export_md_button.clicked.connect(lambda: self.export("markdown"))
         self.export_json_button.clicked.connect(lambda: self.export("json"))
+        self.open_button.clicked.connect(self.open_selected_result)
         self.delete_button.clicked.connect(self.delete_selected)
         self.close_button.clicked.connect(self.accept)
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.export_md_button)
         buttons.addWidget(self.export_json_button)
+        buttons.addWidget(self.open_button)
         buttons.addWidget(self.delete_button)
         buttons.addStretch()
         buttons.addWidget(self.close_button)
@@ -515,24 +501,40 @@ class ResultsDialog(QDialog):
         layout.addWidget(self.table, stretch=1)
         layout.addLayout(buttons)
         self.reload()
-        self._apply_column_widths()
+        self.update_column_widths()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.update_column_widths()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._apply_column_widths()
+        self.update_column_widths()
 
-    def _apply_column_widths(self) -> None:
-        if self.table.columnCount() == 0:
+    def update_column_widths(self) -> None:
+        self.table.setColumnCount(5)
+
+        viewport_width = self.table.viewport().width()
+        if viewport_width <= 0:
             return
 
-        fixed_width = self.COL_ID_WIDTH + self.COL_MODEL_WIDTH + self.COL_DATE_WIDTH
-        available = max(self.table.viewport().width() - fixed_width, 300)
-        prompt_width = max(int(available * self.COL_PROMPT_RATIO), 180)
-        answer_width = max(available - prompt_width, 220)
+        fixed_width = self.COL_ID_WIDTH + self.COL_DATE_WIDTH
+        free_width = max(viewport_width - fixed_width, 120)
+
+        prompt_width = int(free_width * self.COL_PROMPT_RATIO)
+        model_width = int(free_width * self.COL_MODEL_RATIO)
+        answer_width = free_width - prompt_width - model_width
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
 
         self.table.setColumnWidth(0, self.COL_ID_WIDTH)
         self.table.setColumnWidth(1, prompt_width)
-        self.table.setColumnWidth(2, self.COL_MODEL_WIDTH)
+        self.table.setColumnWidth(2, model_width)
         self.table.setColumnWidth(3, answer_width)
         self.table.setColumnWidth(4, self.COL_DATE_WIDTH)
 
@@ -543,6 +545,10 @@ class ResultsDialog(QDialog):
         widget.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         widget.setFont(self.table.font())
         self._install_row_selection(widget, row_index)
         return widget
@@ -557,7 +563,7 @@ class ResultsDialog(QDialog):
             if event.type() == QEvent.Type.MouseButtonPress:
                 self.table.selectRow(int(row_index))
             elif event.type() == QEvent.Type.MouseButtonDblClick:
-                self.on_view_result(int(row_index), 0)
+                self.open_selected_result(int(row_index))
         return super().eventFilter(watched, event)
 
     def _format_date(self, saved_at: str) -> str:
@@ -624,7 +630,7 @@ class ResultsDialog(QDialog):
             self.table.setItem(index, 4, date_item)
             self.table.setRowHeight(index, self.ROW_HEIGHT)
 
-        self._apply_column_widths()
+        self.update_column_widths()
 
     def _get_result_by_id(self, result_id: int) -> model_service.ResultRecord | None:
         for result in self._current_results():
@@ -635,16 +641,46 @@ class ResultsDialog(QDialog):
                 return result
         return None
 
-    def on_view_result(self, row: int, _column: int) -> None:
+    def _on_row_double_clicked(self, row: int, _column: int) -> None:
+        self.open_selected_result(row)
+
+    def open_selected_result(self, row: int | None = None) -> None:
+        if row is None:
+            row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self,
+                "Сохранённые результаты",
+                "Выберите результат для просмотра.",
+            )
+            return
+
         item = self.table.item(row, 0)
         if not item:
+            QMessageBox.information(
+                self,
+                "Сохранённые результаты",
+                "Выберите результат для просмотра.",
+            )
             return
+
         result_id = int(item.data(Qt.ItemDataRole.UserRole))
         result = self._get_result_by_id(result_id)
         if result is None:
+            QMessageBox.information(
+                self,
+                "Сохранённые результаты",
+                "Выберите результат для просмотра.",
+            )
             return
-        dialog = ResultViewDialog(result, self)
-        dialog.exec()
+
+        show_response_markdown(
+            parent=self,
+            model_name=result.model_name,
+            prompt_text=result.prompt_text,
+            response_text=result.response_text,
+            received_at=format_received_at(result.saved_at),
+        )
 
     def _selected_result_id(self) -> int | None:
         row = self.table.currentRow()
