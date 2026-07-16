@@ -1,7 +1,8 @@
-"""Логика работы с моделями нейросетей и промтами."""
+"""Логика работы с моделями нейросетей, промтами, результатами и настройками."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -9,38 +10,33 @@ from typing import Any
 import db
 from dotenv import load_dotenv
 
+DEFAULT_SETTINGS: dict[str, str] = {
+    "request_timeout": "30",
+    "db_path": "chatlist.db",
+    "default_tags": "",
+    "log_requests": "1",
+}
+
 DEFAULT_SEED_MODELS: list[dict[str, Any]] = [
     {
         "name": "GPT-4o",
-        "api_url": "https://openrouter.ai/api/v1/chat/completions",
         "api_id": "openai/gpt-4o",
-        "api_key_env_var": "OPENROUTER_API_KEY",
         "is_active": 1,
-        "model_type": "openrouter",
     },
     {
         "name": "DeepSeek",
-        "api_url": "https://api.deepseek.com/v1/chat/completions",
-        "api_id": "deepseek-chat",
-        "api_key_env_var": "DEEPSEEK_API_KEY",
+        "api_id": "deepseek/deepseek-chat",
         "is_active": 1,
-        "model_type": "deepseek",
     },
     {
-        "name": "Groq Llama",
-        "api_url": "https://api.groq.com/openai/v1/chat/completions",
-        "api_id": "llama-3.3-70b-versatile",
-        "api_key_env_var": "GROQ_API_KEY",
+        "name": "Llama 3.3",
+        "api_id": "meta-llama/llama-3.3-70b-instruct",
         "is_active": 1,
-        "model_type": "groq",
     },
     {
-        "name": "OpenAI GPT-4o",
-        "api_url": "https://api.openai.com/v1/chat/completions",
-        "api_id": "gpt-4o",
-        "api_key_env_var": "OPENAI_API_KEY",
+        "name": "Claude 3.5",
+        "api_id": "anthropic/claude-3.5-sonnet",
         "is_active": 0,
-        "model_type": "openai",
     },
 ]
 
@@ -85,12 +81,81 @@ class PromptRecord:
         )
 
 
+@dataclass
+class ResultRecord:
+    id: int
+    prompt_id: int | None
+    model_id: int | None
+    model_name: str
+    prompt_text: str
+    response_text: str
+    tags: str | None
+    saved_at: str
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> ResultRecord:
+        return cls(
+            id=int(row["id"]),
+            prompt_id=row.get("prompt_id"),
+            model_id=row.get("model_id"),
+            model_name=str(row["model_name"]),
+            prompt_text=str(row["prompt_text"]),
+            response_text=str(row["response_text"]),
+            tags=row.get("tags"),
+            saved_at=str(row["saved_at"]),
+        )
+
+
 def init_environment() -> None:
     load_dotenv()
 
 
-def get_api_key(api_key_env_var: str) -> str | None:
+def get_openrouter_base_url() -> str:
+    return os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+
+
+def get_openrouter_endpoint() -> str:
+    return f"{get_openrouter_base_url()}/chat/completions"
+
+
+def get_api_key(api_key_env_var: str = "OPENROUTER_API_KEY") -> str | None:
     return os.getenv(api_key_env_var)
+
+
+def get_api_endpoint(model: ModelRecord) -> str:
+    if model.api_url.startswith("http"):
+        return model.api_url
+    return get_openrouter_endpoint()
+
+
+def init_default_settings() -> None:
+    for key, value in DEFAULT_SETTINGS.items():
+        if db.get_setting(key) is None:
+            db.set_setting(key, value)
+
+
+def get_setting_value(key: str, default: str = "") -> str:
+    return db.get_setting(key) or default
+
+
+def set_setting_value(key: str, value: str) -> None:
+    db.set_setting(key, value)
+
+
+def get_request_timeout() -> float:
+    try:
+        return float(get_setting_value("request_timeout", "30"))
+    except ValueError:
+        return 30.0
+
+
+def get_default_tags() -> str | None:
+    tags = get_setting_value("default_tags", "").strip()
+    return tags or None
+
+
+def is_logging_enabled() -> bool:
+    return get_setting_value("log_requests", "1") == "1"
 
 
 def load_models() -> list[ModelRecord]:
@@ -106,15 +171,29 @@ def get_model_by_id(model_id: int) -> ModelRecord | None:
     return ModelRecord.from_row(row) if row else None
 
 
+def get_model_by_name(name: str) -> ModelRecord | None:
+    for model in load_models():
+        if model.name == name:
+            return model
+    return None
+
+
 def add_model(
     name: str,
-    api_url: str,
     api_id: str,
-    api_key_env_var: str,
     is_active: int = 1,
-    model_type: str | None = None,
+    api_url: str | None = None,
+    api_key_env_var: str = "OPENROUTER_API_KEY",
+    model_type: str = "openrouter",
 ) -> int:
-    return db.create_model(name, api_url, api_id, api_key_env_var, is_active, model_type)
+    return db.create_model(
+        name=name,
+        api_url=api_url or get_openrouter_endpoint(),
+        api_id=api_id,
+        api_key_env_var=api_key_env_var,
+        is_active=is_active,
+        model_type=model_type,
+    )
 
 
 def edit_model(model: ModelRecord) -> None:
@@ -139,20 +218,42 @@ def set_model_active(model_id: int, is_active: bool) -> None:
 
 def seed_default_models() -> None:
     if db.count_models() > 0:
+        sync_models_to_openrouter()
         return
+
+    endpoint = get_openrouter_endpoint()
     for item in DEFAULT_SEED_MODELS:
         db.create_model(
             name=item["name"],
-            api_url=item["api_url"],
+            api_url=endpoint,
             api_id=item["api_id"],
-            api_key_env_var=item["api_key_env_var"],
+            api_key_env_var="OPENROUTER_API_KEY",
             is_active=item["is_active"],
-            model_type=item.get("model_type"),
+            model_type="openrouter",
         )
 
 
+def sync_models_to_openrouter() -> None:
+    endpoint = get_openrouter_endpoint()
+    seed_by_name = {item["name"]: item for item in DEFAULT_SEED_MODELS}
+
+    for model in load_models():
+        seed = seed_by_name.get(model.name)
+        api_id = seed["api_id"] if seed else model.api_id
+        updated = ModelRecord(
+            id=model.id,
+            name=model.name,
+            api_url=endpoint,
+            api_id=api_id,
+            api_key_env_var="OPENROUTER_API_KEY",
+            is_active=model.is_active,
+            model_type="openrouter",
+        )
+        edit_model(updated)
+
+
 def save_prompt(prompt: str, tags: str | None = None) -> int:
-    return db.create_prompt(prompt, tags)
+    return db.create_prompt(prompt, tags or get_default_tags())
 
 
 def load_prompts(search: str | None = None) -> list[PromptRecord]:
@@ -162,3 +263,75 @@ def load_prompts(search: str | None = None) -> list[PromptRecord]:
 def get_prompt_by_id(prompt_id: int) -> PromptRecord | None:
     row = db.get_prompt(prompt_id)
     return PromptRecord.from_row(row) if row else None
+
+
+def remove_prompt(prompt_id: int) -> None:
+    db.delete_prompt(prompt_id)
+
+
+def save_result(
+    model_name: str,
+    prompt_text: str,
+    response_text: str,
+    prompt_id: int | None = None,
+    model_id: int | None = None,
+    tags: str | None = None,
+) -> int:
+    return db.create_result(
+        model_name=model_name,
+        prompt_text=prompt_text,
+        response_text=response_text,
+        prompt_id=prompt_id,
+        model_id=model_id,
+        tags=tags,
+    )
+
+
+def load_results(search: str | None = None) -> list[ResultRecord]:
+    return [ResultRecord.from_row(row) for row in db.list_results(search=search)]
+
+
+def remove_result(result_id: int) -> None:
+    db.delete_result(result_id)
+
+
+def export_results_to_markdown(results: list[ResultRecord]) -> str:
+    lines = ["# Экспорт результатов ChatList", ""]
+    for index, result in enumerate(results, start=1):
+        lines.extend(
+            [
+                f"## {index}. {result.model_name}",
+                "",
+                f"**Дата:** {result.saved_at}  ",
+                f"**Теги:** {result.tags or '—'}  ",
+                "",
+                "### Промт",
+                "",
+                result.prompt_text,
+                "",
+                "### Ответ",
+                "",
+                result.response_text,
+                "",
+                "---",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def export_results_to_json(results: list[ResultRecord]) -> str:
+    payload = [
+        {
+            "id": result.id,
+            "saved_at": result.saved_at,
+            "model_name": result.model_name,
+            "prompt_text": result.prompt_text,
+            "response_text": result.response_text,
+            "tags": result.tags,
+            "prompt_id": result.prompt_id,
+            "model_id": result.model_id,
+        }
+        for result in results
+    ]
+    return json.dumps(payload, ensure_ascii=False, indent=2)

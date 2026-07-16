@@ -105,18 +105,32 @@ def get_prompt(prompt_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[st
 
 def list_prompts(
     search: str | None = None,
+    order_by: str = "created_at",
+    order_dir: str = "DESC",
     db_path: Path | str = DEFAULT_DB_PATH,
 ) -> list[dict[str, Any]]:
+    allowed_columns = {"created_at", "prompt", "tags", "id"}
+    allowed_dirs = {"ASC", "DESC"}
+    if order_by not in allowed_columns:
+        order_by = "created_at"
+    if order_dir not in allowed_dirs:
+        order_dir = "DESC"
+
     query = "SELECT * FROM prompts"
     params: tuple[Any, ...] = ()
     if search:
         query += " WHERE prompt LIKE ? OR IFNULL(tags, '') LIKE ?"
         pattern = f"%{search}%"
         params = (pattern, pattern)
-    query += " ORDER BY created_at DESC"
+    query += f" ORDER BY {order_by} {order_dir}"
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+
+def delete_prompt(prompt_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
 
 
 # --- models ---
@@ -228,10 +242,37 @@ def create_result(
         return int(cursor.lastrowid)
 
 
-def list_results(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict[str, Any]]:
+def list_results(
+    search: str | None = None,
+    order_by: str = "saved_at",
+    order_dir: str = "DESC",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    allowed_columns = {"saved_at", "model_name", "prompt_text", "response_text", "tags", "id"}
+    allowed_dirs = {"ASC", "DESC"}
+    if order_by not in allowed_columns:
+        order_by = "saved_at"
+    if order_dir not in allowed_dirs:
+        order_dir = "DESC"
+
+    query = "SELECT * FROM results"
+    params: tuple[Any, ...] = ()
+    if search:
+        query += (
+            " WHERE model_name LIKE ? OR prompt_text LIKE ? "
+            "OR response_text LIKE ? OR IFNULL(tags, '') LIKE ?"
+        )
+        pattern = f"%{search}%"
+        params = (pattern, pattern, pattern, pattern)
+    query += f" ORDER BY {order_by} {order_dir}"
     with get_connection(db_path) as conn:
-        rows = conn.execute("SELECT * FROM results ORDER BY saved_at DESC").fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+
+def delete_result(result_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute("DELETE FROM results WHERE id = ?", (result_id,))
 
 
 # --- settings ---
@@ -296,7 +337,13 @@ def _self_test() -> None:
         model_id=model_id,
         db_path=test_db,
     )
-    assert len(list_results(test_db)) == 1
+    assert len(list_results(db_path=test_db)) == 1
+
+    delete_prompt(prompt_id, test_db)
+    rows = list_results(db_path=test_db)
+    assert len(rows) == 1
+    assert rows[0]["prompt_id"] is None
+    assert rows[0]["prompt_text"] == "Тестовый промт"
 
     set_setting("request_timeout", "30", test_db)
     assert get_setting("request_timeout", test_db) == "30"

@@ -5,13 +5,12 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -29,10 +28,12 @@ from PyQt6.QtWidgets import (
 import db
 import models as model_service
 import network
+from dialogs import ModelsDialog, PromptsDialog, ResultsDialog, SettingsDialog
 
 
 @dataclass
 class TempResultRow:
+    model_id: int | None
     model_name: str
     response_text: str
     selected: bool = False
@@ -47,8 +48,10 @@ class TempResultsStore:
     def clear(self) -> None:
         self._rows.clear()
 
-    def add(self, model_name: str, response_text: str) -> None:
-        self._rows.append(TempResultRow(model_name=model_name, response_text=response_text))
+    def add(self, model_id: int | None, model_name: str, response_text: str) -> None:
+        self._rows.append(
+            TempResultRow(model_id=model_id, model_name=model_name, response_text=response_text)
+        )
 
     def set_selected(self, index: int, selected: bool) -> None:
         if 0 <= index < len(self._rows):
@@ -61,26 +64,21 @@ class TempResultsStore:
         return list(self._rows)
 
 
-class PlaceholderDialog(QDialog):
-    """Пустой диалог-заглушка для пунктов меню."""
+class SendPromptWorker(QThread):
+    finished = pyqtSignal(list)
+    failed = pyqtSignal(str)
 
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumSize(360, 200)
+    def __init__(self, prompt: str, active_models: list[model_service.ModelRecord]) -> None:
+        super().__init__()
+        self.prompt = prompt
+        self.active_models = active_models
 
-        label = QLabel(f"Раздел «{title}» будет реализован на следующих этапах.")
-        label.setWordWrap(True)
-        label.setFont(QFont("Segoe UI", 10))
-
-        close_button = QPushButton("Закрыть")
-        close_button.clicked.connect(self.accept)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.addWidget(label)
-        layout.addStretch()
-        layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+    def run(self) -> None:
+        try:
+            results = network.send_prompt_to_all(self.prompt, self.active_models)
+            self.finished.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -89,6 +87,8 @@ class MainWindow(QMainWindow):
         self.temp_results = TempResultsStore()
         self._last_prompt = ""
         self._loading_prompt = False
+        self._current_prompt_id: int | None = None
+        self._send_worker: SendPromptWorker | None = None
 
         self.setWindowTitle("ChatList — Сравнение ответов нейросетей")
         self.setMinimumSize(700, 500)
@@ -174,43 +174,67 @@ class MainWindow(QMainWindow):
         menu_bar.setFont(QFont("Segoe UI", 9))
 
         prompts_menu = menu_bar.addMenu("Промты")
-        prompts_menu.addAction("Управление промтами", lambda: self._open_placeholder("Промты"))
+        prompts_menu.addAction("Управление промтами", self.open_prompts_dialog)
 
         models_menu = menu_bar.addMenu("Модели")
-        models_menu.addAction("Управление моделями", lambda: self._open_placeholder("Модели"))
+        models_menu.addAction("Управление моделями", self.open_models_dialog)
 
         results_menu = menu_bar.addMenu("Результаты")
-        results_menu.addAction("Сохранённые результаты", lambda: self._open_placeholder("Результаты"))
+        results_menu.addAction("Сохранённые результаты", self.open_results_dialog)
 
         settings_menu = menu_bar.addMenu("Настройки")
-        settings_menu.addAction("Параметры программы", lambda: self._open_placeholder("Настройки"))
+        settings_menu.addAction("Параметры программы", self.open_settings_dialog)
 
-    def _open_placeholder(self, title: str) -> None:
-        dialog = PlaceholderDialog(title, self)
+    def open_prompts_dialog(self) -> None:
+        dialog = PromptsDialog(self)
+        dialog.exec()
+        self.load_prompt_list()
+
+    def open_models_dialog(self) -> None:
+        dialog = ModelsDialog(self)
+        dialog.exec()
+
+    def open_results_dialog(self) -> None:
+        dialog = ResultsDialog(self)
+        dialog.exec()
+
+    def open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self)
         dialog.exec()
 
     def load_prompt_list(self) -> None:
         self.prompt_combo.blockSignals(True)
+        current_text = self.prompt_input.toPlainText().strip()
         self.prompt_combo.clear()
         self.prompt_combo.addItem("", None)
 
+        selected_index = 0
         try:
-            for prompt in model_service.load_prompts():
+            for index, prompt in enumerate(model_service.load_prompts(), start=1):
                 preview = prompt.prompt.replace("\n", " ").strip()
                 if len(preview) > 80:
                     preview = preview[:80] + "..."
-                self.prompt_combo.addItem(preview, prompt.prompt)
+                data = {"id": prompt.id, "text": prompt.prompt}
+                self.prompt_combo.addItem(preview, data)
+                if current_text and current_text == prompt.prompt:
+                    selected_index = index
         except Exception:
             pass
 
-        self.prompt_combo.setCurrentIndex(0)
+        self.prompt_combo.setCurrentIndex(selected_index)
         self.prompt_combo.blockSignals(False)
 
     def on_prompt_combo_changed(self, index: int) -> None:
         if index <= 0:
+            self._current_prompt_id = None
             return
 
-        prompt_text = self.prompt_combo.itemData(index)
+        data = self.prompt_combo.itemData(index)
+        if not isinstance(data, dict):
+            return
+
+        prompt_text = data.get("text")
+        prompt_id = data.get("id")
         if not prompt_text:
             return
 
@@ -218,12 +242,19 @@ class MainWindow(QMainWindow):
         self.prompt_input.setPlainText(str(prompt_text))
         self._loading_prompt = False
         self._last_prompt = str(prompt_text).strip()
+        self._current_prompt_id = int(prompt_id) if prompt_id is not None else None
 
     def on_prompt_changed(self) -> None:
         if self._loading_prompt:
             return
 
         current_prompt = self.prompt_input.toPlainText().strip()
+        combo_data = self.prompt_combo.currentData()
+        if isinstance(combo_data, dict) and combo_data.get("text") == current_prompt:
+            self._current_prompt_id = int(combo_data["id"]) if combo_data.get("id") is not None else None
+        else:
+            self._current_prompt_id = None
+
         if self._last_prompt and current_prompt != self._last_prompt and self.temp_results.all_rows():
             self.temp_results.clear()
             self.refresh_results_table()
@@ -235,23 +266,48 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "ChatList", "Введите текст промта.")
             return
 
+        if self._current_prompt_id is None:
+            combo_data = self.prompt_combo.currentData()
+            if isinstance(combo_data, dict) and combo_data.get("text") == prompt:
+                self._current_prompt_id = int(combo_data["id"])
+            else:
+                self._current_prompt_id = model_service.save_prompt(prompt)
+                self.load_prompt_list()
+
         self._last_prompt = prompt
         self.send_button.setEnabled(False)
+        self.clear_button.setEnabled(False)
         self.status_label.setText("Отправка запросов...")
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
         active_models = model_service.load_active_models()
-        results = network.send_prompt_to_all(prompt, active_models)
+        self._send_worker = SendPromptWorker(prompt, active_models)
+        self._send_worker.finished.connect(self.on_send_finished)
+        self._send_worker.failed.connect(self.on_send_failed)
+        self._send_worker.start()
+
+    def on_send_finished(self, results: list[network.RequestResult]) -> None:
+        QApplication.restoreOverrideCursor()
+        self.send_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
 
         self.temp_results.clear()
         for item in results:
-            self.temp_results.add(item.model_name, item.response_text)
+            self.temp_results.add(item.model_id, item.model_name, item.response_text)
 
         self.refresh_results_table()
-        self.send_button.setEnabled(True)
+        success_count = sum(1 for item in results if item.success)
         self.status_label.setText(
-            f"Получено ответов: {len(results)}. "
-            f"Режим: {'заглушка' if network.STUB_MODE else 'реальные запросы'}."
+            f"Получено ответов: {len(results)} (успешно: {success_count}). "
+            f"Запросы отправлены через OpenRouter."
         )
+
+    def on_send_failed(self, message: str) -> None:
+        QApplication.restoreOverrideCursor()
+        self.send_button.setEnabled(True)
+        self.clear_button.setEnabled(True)
+        self.status_label.setText(f"Ошибка отправки: {message}")
+        QMessageBox.critical(self, "ChatList", f"Не удалось отправить запросы:\n{message}")
 
     def refresh_results_table(self) -> None:
         rows = self.temp_results.all_rows()
@@ -293,12 +349,29 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "ChatList", "Отметьте хотя бы один результат для сохранения.")
             return
 
-        QMessageBox.information(
-            self,
-            "ChatList",
-            f"Выбрано строк: {len(selected)}.\n"
-            "Сохранение в базу данных будет реализовано на этапе 6.",
-        )
+        prompt_text = self.prompt_input.toPlainText().strip()
+        tags = model_service.get_default_tags()
+        saved_count = 0
+
+        try:
+            for row in selected:
+                model_service.save_result(
+                    model_name=row.model_name,
+                    prompt_text=prompt_text,
+                    response_text=row.response_text,
+                    prompt_id=self._current_prompt_id,
+                    model_id=row.model_id,
+                    tags=tags,
+                )
+                saved_count += 1
+        except Exception as exc:
+            QMessageBox.critical(self, "ChatList", f"Ошибка сохранения:\n{exc}")
+            return
+
+        self.temp_results.clear()
+        self.refresh_results_table()
+        self.status_label.setText(f"Сохранено результатов: {saved_count}.")
+        QMessageBox.information(self, "ChatList", f"Сохранено результатов: {saved_count}.")
 
     def on_clear(self) -> None:
         self._loading_prompt = True
@@ -307,6 +380,7 @@ class MainWindow(QMainWindow):
         self._loading_prompt = False
 
         self._last_prompt = ""
+        self._current_prompt_id = None
         self.temp_results.clear()
         self.refresh_results_table()
         self.status_label.setText("Промт и результаты очищены.")
@@ -315,7 +389,9 @@ class MainWindow(QMainWindow):
 def main() -> None:
     model_service.init_environment()
     db.init_db()
+    model_service.init_default_settings()
     model_service.seed_default_models()
+    network.setup_logging()
 
     app = QApplication(sys.argv)
     app.setStyle("Windows11" if "Windows11" in QStyleFactory.keys() else "Fusion")
