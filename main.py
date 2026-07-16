@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
     QApplication,
@@ -29,6 +30,7 @@ import db
 import models as model_service
 import network
 from dialogs import ModelsDialog, PromptsDialog, ResultsDialog, SettingsDialog
+from markdown_viewer import format_received_at, show_response_markdown
 
 
 @dataclass
@@ -37,6 +39,7 @@ class TempResultRow:
     model_name: str
     response_text: str
     selected: bool = False
+    received_at: str | None = None
 
 
 class TempResultsStore:
@@ -48,9 +51,20 @@ class TempResultsStore:
     def clear(self) -> None:
         self._rows.clear()
 
-    def add(self, model_id: int | None, model_name: str, response_text: str) -> None:
+    def add(
+        self,
+        model_id: int | None,
+        model_name: str,
+        response_text: str,
+        received_at: str | None = None,
+    ) -> None:
         self._rows.append(
-            TempResultRow(model_id=model_id, model_name=model_name, response_text=response_text)
+            TempResultRow(
+                model_id=model_id,
+                model_name=model_name,
+                response_text=response_text,
+                received_at=received_at,
+            )
         )
 
     def set_selected(self, index: int, selected: bool) -> None:
@@ -131,15 +145,23 @@ class MainWindow(QMainWindow):
         self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.results_table.setColumnWidth(0, 70)
-        self.results_table.setColumnWidth(1, 160)
+        self.results_table.setColumnWidth(0, 80)
+        self.results_table.setColumnWidth(1, 180)
         self.results_table.setAlternatingRowColors(True)
-        self.results_table.setWordWrap(True)
+        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.results_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.results_table.cellClicked.connect(self.on_results_cell_clicked)
+        self.results_table.cellDoubleClicked.connect(self.on_open_response)
 
         self.save_selected_button = QPushButton("Сохранить выбранные")
         self.save_selected_button.setFont(button_font)
         self.save_selected_button.setEnabled(False)
         self.save_selected_button.clicked.connect(self.on_save_selected)
+
+        self.open_button = QPushButton("Открыть")
+        self.open_button.setFont(button_font)
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self.on_open_response)
 
         self.clear_button = QPushButton("Очистить")
         self.clear_button.setFont(button_font)
@@ -148,6 +170,7 @@ class MainWindow(QMainWindow):
         action_buttons = QHBoxLayout()
         action_buttons.setSpacing(8)
         action_buttons.addWidget(self.save_selected_button)
+        action_buttons.addWidget(self.open_button)
         action_buttons.addWidget(self.clear_button)
         action_buttons.addStretch()
 
@@ -277,6 +300,7 @@ class MainWindow(QMainWindow):
         self._last_prompt = prompt
         self.send_button.setEnabled(False)
         self.clear_button.setEnabled(False)
+        self.open_button.setEnabled(False)
         self.status_label.setText("Отправка запросов...")
         QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
 
@@ -292,8 +316,14 @@ class MainWindow(QMainWindow):
         self.clear_button.setEnabled(True)
 
         self.temp_results.clear()
+        received_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         for item in results:
-            self.temp_results.add(item.model_id, item.model_name, item.response_text)
+            self.temp_results.add(
+                item.model_id,
+                item.model_name,
+                item.response_text,
+                received_at=received_at,
+            )
 
         self.refresh_results_table()
         success_count = sum(1 for item in results if item.success)
@@ -306,47 +336,122 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.send_button.setEnabled(True)
         self.clear_button.setEnabled(True)
+        self._update_save_button_state()
         self.status_label.setText(f"Ошибка отправки: {message}")
         QMessageBox.critical(self, "ChatList", f"Не удалось отправить запросы:\n{message}")
+
+    def _display_model_name(self, model_name: str | None) -> str:
+        name = (model_name or "").strip()
+        return name if name else "Неизвестная модель"
+
+    def _create_checkbox_widget(self, row_index: int, checked: bool) -> QWidget:
+        checkbox = QCheckBox()
+        checkbox.blockSignals(True)
+        checkbox.setChecked(checked)
+        checkbox.blockSignals(False)
+        checkbox.toggled.connect(
+            lambda is_checked, index=row_index: self.on_row_selected(index, is_checked)
+        )
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(checkbox, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._install_row_selection(container, row_index)
+        return container
+
+    def _create_answer_widget(self, row_index: int, response_text: str) -> QTextEdit:
+        answer_widget = QTextEdit()
+        answer_widget.setReadOnly(True)
+        answer_widget.setPlainText(response_text)
+        answer_widget.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        answer_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        answer_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        answer_widget.setFont(self.results_table.font())
+        self._install_row_selection(answer_widget, row_index)
+        return answer_widget
+
+    def _install_row_selection(self, widget: QWidget, row_index: int) -> None:
+        widget.setProperty("result_row_index", row_index)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress:
+            row_index = watched.property("result_row_index")
+            if row_index is not None:
+                self.results_table.selectRow(int(row_index))
+        return super().eventFilter(watched, event)
+
+    def on_results_cell_clicked(self, row: int, _column: int) -> None:
+        self.results_table.selectRow(row)
 
     def refresh_results_table(self) -> None:
         rows = self.temp_results.all_rows()
         self.results_table.setRowCount(len(rows))
 
         for index, row in enumerate(rows):
-            checkbox = QCheckBox()
-            checkbox.setChecked(row.selected)
-            checkbox.stateChanged.connect(
-                lambda state, row_index=index: self.on_row_selected(row_index, state)
-            )
+            checkbox_widget = self._create_checkbox_widget(index, row.selected)
 
-            model_item = QTableWidgetItem(row.model_name)
+            model_item = QTableWidgetItem(self._display_model_name(row.model_name))
             model_item.setFlags(model_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-
-            response_item = QTableWidgetItem(row.response_text)
-            response_item.setFlags(response_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            response_item.setTextAlignment(
+            model_item.setTextAlignment(
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             )
 
-            self.results_table.setCellWidget(index, 0, checkbox)
+            answer_widget = self._create_answer_widget(index, row.response_text)
+
+            self.results_table.setCellWidget(index, 0, checkbox_widget)
             self.results_table.setItem(index, 1, model_item)
-            self.results_table.setItem(index, 2, response_item)
-            self.results_table.resizeRowToContents(index)
+            self.results_table.setCellWidget(index, 2, answer_widget)
+            self.results_table.setRowHeight(index, 160)
 
         self._update_save_button_state()
 
-    def on_row_selected(self, row_index: int, state: int) -> None:
-        self.temp_results.set_selected(row_index, state == int(Qt.CheckState.Checked))
+    def on_row_selected(self, row_index: int, checked: bool) -> None:
+        self.temp_results.set_selected(row_index, checked)
+        self.results_table.selectRow(row_index)
+
+    def _resolve_open_row_index(self) -> int | None:
+        selected_row = self.results_table.currentRow()
+        if selected_row >= 0 and selected_row < len(self.temp_results.all_rows()):
+            return selected_row
+
+        checked_rows = [
+            index
+            for index, row in enumerate(self.temp_results.all_rows())
+            if row.selected
+        ]
+        if len(checked_rows) == 1:
+            return checked_rows[0]
+
+        return None
+
+    def on_open_response(self, *_args: object) -> None:
+        row_index = self._resolve_open_row_index()
+        if row_index is None:
+            QMessageBox.information(self, "ChatList", "Выберите ответ нейросети для просмотра.")
+            return
+
+        row = self.temp_results.all_rows()[row_index]
+        prompt_text = self.prompt_input.toPlainText().strip()
+
+        show_response_markdown(
+            parent=self,
+            model_name=row.model_name,
+            prompt_text=prompt_text,
+            response_text=row.response_text,
+            received_at=format_received_at(row.received_at),
+        )
 
     def _update_save_button_state(self) -> None:
         has_results = bool(self.temp_results.all_rows())
         self.save_selected_button.setEnabled(has_results)
+        self.open_button.setEnabled(has_results)
 
     def on_save_selected(self) -> None:
         selected = self.temp_results.get_selected()
         if not selected:
-            QMessageBox.information(self, "ChatList", "Отметьте хотя бы один результат для сохранения.")
+            QMessageBox.information(self, "ChatList", "Отметьте хотя бы один ответ для сохранения.")
             return
 
         prompt_text = self.prompt_input.toPlainText().strip()
