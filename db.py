@@ -272,8 +272,8 @@ def list_results(
     params: tuple[Any, ...] = ()
     if search:
         query += (
-            " WHERE model_name LIKE ? OR prompt_text LIKE ? "
-            "OR response_text LIKE ? OR IFNULL(tags, '') LIKE ?"
+            " WHERE LOWER(model_name) LIKE LOWER(?) OR LOWER(prompt_text) LIKE LOWER(?) "
+            "OR LOWER(response_text) LIKE LOWER(?) OR LOWER(IFNULL(tags, '')) LIKE LOWER(?)"
         )
         pattern = f"%{search}%"
         params = (pattern, pattern, pattern, pattern)

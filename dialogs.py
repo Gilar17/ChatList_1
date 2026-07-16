@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, QObject, Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -413,94 +415,253 @@ class ModelsDialog(QDialog):
         self.reload()
 
 
-class ResultsDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
+class ResultViewDialog(QDialog):
+    """Окно просмотра полного текста ответа."""
+
+    def __init__(self, result: model_service.ResultRecord, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Результаты")
-        self.resize(960, 520)
+        self.setWindowTitle(f"Ответ: {result.model_name}")
+        self.resize(700, 500)
 
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Поиск по модели, промту, ответу или тегам...")
-        self.search_input.textChanged.connect(self.reload)
+        info_label = QLabel(f"Промт: {result.prompt_text.replace(chr(10), ' ')[:120]}")
+        info_label.setWordWrap(True)
+        info_label.setFont(QFont("Segoe UI", 9))
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["ID", "Дата", "Модель", "Промт", "Ответ", "Теги"]
-        )
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setAlternatingRowColors(True)
+        response_view = QTextEdit()
+        response_view.setReadOnly(True)
+        response_view.setFont(QFont("Segoe UI", 10))
+        response_view.setPlainText(result.response_text)
+        response_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
 
-        export_md_button = QPushButton("Экспорт Markdown")
-        export_json_button = QPushButton("Экспорт JSON")
-        delete_button = QPushButton("Удалить выбранный")
         close_button = QPushButton("Закрыть")
-
-        export_md_button.clicked.connect(lambda: self.export("markdown"))
-        export_json_button.clicked.connect(lambda: self.export("json"))
-        delete_button.clicked.connect(self.delete_selected)
         close_button.clicked.connect(self.accept)
 
         buttons = QHBoxLayout()
-        buttons.addWidget(export_md_button)
-        buttons.addWidget(export_json_button)
-        buttons.addWidget(delete_button)
         buttons.addStretch()
         buttons.addWidget(close_button)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.search_input)
-        layout.addWidget(self.table)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(info_label)
+        layout.addWidget(response_view, stretch=1)
+        layout.addLayout(buttons)
+
+
+class ResultsDialog(QDialog):
+    SORT_OPTIONS = {
+        "Дата создания": ("saved_at", "DESC"),
+        "Промт": ("prompt_text", "ASC"),
+        "Модель": ("model_name", "ASC"),
+    }
+
+    ROW_HEIGHT = 140
+    COL_ID_WIDTH = 58
+    COL_MODEL_WIDTH = 165
+    COL_DATE_WIDTH = 160
+    COL_PROMPT_RATIO = 0.34
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Сохранённые результаты")
+        self.resize(950, 650)
+
+        search_label = QLabel("Поиск:")
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по промту, модели, ответу или тегам...")
+        self.search_input.textChanged.connect(self.reload)
+
+        sort_label = QLabel("Сортировать по:")
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(list(self.SORT_OPTIONS.keys()))
+        self.sort_combo.currentTextChanged.connect(self.reload)
+
+        top_row = QHBoxLayout()
+        top_row.addWidget(search_label)
+        top_row.addWidget(self.search_input, stretch=1)
+        top_row.addWidget(sort_label)
+        top_row.addWidget(self.sort_combo)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["ID", "Промт", "Модель", "Ответ", "Дата"])
+        header = self.table.horizontalHeader()
+        for column in range(5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.cellDoubleClicked.connect(self.on_view_result)
+        self.table.verticalHeader().setVisible(False)
+
+        self.export_md_button = QPushButton("Экспорт в Markdown")
+        self.export_json_button = QPushButton("Экспорт в JSON")
+        self.delete_button = QPushButton("Удалить")
+        self.close_button = QPushButton("Закрыть")
+
+        self.export_md_button.clicked.connect(lambda: self.export("markdown"))
+        self.export_json_button.clicked.connect(lambda: self.export("json"))
+        self.delete_button.clicked.connect(self.delete_selected)
+        self.close_button.clicked.connect(self.accept)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.export_md_button)
+        buttons.addWidget(self.export_json_button)
+        buttons.addWidget(self.delete_button)
+        buttons.addStretch()
+        buttons.addWidget(self.close_button)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top_row)
+        layout.addWidget(self.table, stretch=1)
         layout.addLayout(buttons)
         self.reload()
+        self._apply_column_widths()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_column_widths()
+
+    def _apply_column_widths(self) -> None:
+        if self.table.columnCount() == 0:
+            return
+
+        fixed_width = self.COL_ID_WIDTH + self.COL_MODEL_WIDTH + self.COL_DATE_WIDTH
+        available = max(self.table.viewport().width() - fixed_width, 300)
+        prompt_width = max(int(available * self.COL_PROMPT_RATIO), 180)
+        answer_width = max(available - prompt_width, 220)
+
+        self.table.setColumnWidth(0, self.COL_ID_WIDTH)
+        self.table.setColumnWidth(1, prompt_width)
+        self.table.setColumnWidth(2, self.COL_MODEL_WIDTH)
+        self.table.setColumnWidth(3, answer_width)
+        self.table.setColumnWidth(4, self.COL_DATE_WIDTH)
+
+    def _create_scrollable_text_widget(self, text: str, row_index: int) -> QTextEdit:
+        widget = QTextEdit()
+        widget.setReadOnly(True)
+        widget.setPlainText(text)
+        widget.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        widget.setFont(self.table.font())
+        self._install_row_selection(widget, row_index)
+        return widget
+
+    def _install_row_selection(self, widget: QWidget, row_index: int) -> None:
+        widget.setProperty("result_row_index", row_index)
+        widget.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        row_index = watched.property("result_row_index")
+        if row_index is not None:
+            if event.type() == QEvent.Type.MouseButtonPress:
+                self.table.selectRow(int(row_index))
+            elif event.type() == QEvent.Type.MouseButtonDblClick:
+                self.on_view_result(int(row_index), 0)
+        return super().eventFilter(watched, event)
+
+    def _format_date(self, saved_at: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(saved_at)
+            return parsed.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return saved_at
+
+    def _sort_params(self) -> tuple[str, str]:
+        return self.SORT_OPTIONS.get(self.sort_combo.currentText(), ("saved_at", "DESC"))
 
     def _current_results(self) -> list[model_service.ResultRecord]:
         search = self.search_input.text().strip() or None
-        return model_service.load_results(search=search)
+        order_by, order_dir = self._sort_params()
+        rows = model_service.load_results(search=search)
+
+        if order_by == "saved_at":
+            rows.sort(key=lambda item: item.saved_at, reverse=order_dir == "DESC")
+        elif order_by == "prompt_text":
+            rows.sort(key=lambda item: item.prompt_text.lower(), reverse=order_dir == "DESC")
+        elif order_by == "model_name":
+            rows.sort(key=lambda item: item.model_name.lower(), reverse=order_dir == "DESC")
+
+        return rows
 
     def reload(self) -> None:
         rows = self._current_results()
         self.table.setRowCount(len(rows))
+
         for index, row in enumerate(rows):
-            prompt_preview = row.prompt_text.replace("\n", " ")
-            if len(prompt_preview) > 80:
-                prompt_preview = prompt_preview[:80] + "..."
-            response_preview = row.response_text.replace("\n", " ")
-            if len(response_preview) > 120:
-                response_preview = response_preview[:120] + "..."
+            result_id = row.id
+            prompt_text = row.prompt_text or ""
+            model_name = row.model_name or "Неизвестная модель"
+            response_text = row.response_text or ""
+            saved_at = self._format_date(row.saved_at or "")
 
-            values = [
-                row.id,
-                row.saved_at,
-                row.model_name,
-                prompt_preview,
-                response_preview,
-                row.tags or "",
-            ]
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                item.setData(Qt.ItemDataRole.UserRole, row.id)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                self.table.setItem(index, col, item)
+            id_item = QTableWidgetItem(str(result_id))
+            id_item.setData(Qt.ItemDataRole.UserRole, result_id)
+            id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            id_item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
 
-    def _selected_ids(self) -> list[int]:
-        ids: list[int] = []
-        for item in self.table.selectedItems():
-            if item.column() == 0:
-                ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
-        return ids
+            model_item = QTableWidgetItem(model_name)
+            model_item.setData(Qt.ItemDataRole.UserRole, result_id)
+            model_item.setFlags(model_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            model_item.setTextAlignment(
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            )
+
+            date_item = QTableWidgetItem(saved_at)
+            date_item.setData(Qt.ItemDataRole.UserRole, result_id)
+            date_item.setFlags(date_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            date_item.setTextAlignment(
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            )
+
+            prompt_widget = self._create_scrollable_text_widget(prompt_text, index)
+            answer_widget = self._create_scrollable_text_widget(response_text, index)
+
+            self.table.setItem(index, 0, id_item)
+            self.table.setCellWidget(index, 1, prompt_widget)
+            self.table.setItem(index, 2, model_item)
+            self.table.setCellWidget(index, 3, answer_widget)
+            self.table.setItem(index, 4, date_item)
+            self.table.setRowHeight(index, self.ROW_HEIGHT)
+
+        self._apply_column_widths()
+
+    def _get_result_by_id(self, result_id: int) -> model_service.ResultRecord | None:
+        for result in self._current_results():
+            if result.id == result_id:
+                return result
+        for result in model_service.load_results():
+            if result.id == result_id:
+                return result
+        return None
+
+    def on_view_result(self, row: int, _column: int) -> None:
+        item = self.table.item(row, 0)
+        if not item:
+            return
+        result_id = int(item.data(Qt.ItemDataRole.UserRole))
+        result = self._get_result_by_id(result_id)
+        if result is None:
+            return
+        dialog = ResultViewDialog(result, self)
+        dialog.exec()
+
+    def _selected_result_id(self) -> int | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        item = self.table.item(row, 0)
+        return int(item.data(Qt.ItemDataRole.UserRole)) if item else None
 
     def export(self, fmt: str) -> None:
-        selected_ids = self._selected_ids()
-        results = self._current_results()
-        if selected_ids:
-            results = [row for row in results if row.id in selected_ids]
+        result_id = self._selected_result_id()
+        if result_id is None:
+            QMessageBox.information(self, "Сохранённые результаты", "Выберите результат для экспорта.")
+            return
+
+        results = [row for row in self._current_results() if row.id == result_id]
         if not results:
-            QMessageBox.information(self, "Результаты", "Нет данных для экспорта.")
+            QMessageBox.information(self, "Сохранённые результаты", "Выберите результат для экспорта.")
             return
 
         if fmt == "markdown":
@@ -516,20 +677,25 @@ class ResultsDialog(QDialog):
         if not file_path:
             return
         Path(file_path).write_text(content, encoding="utf-8")
-        QMessageBox.information(self, "Результаты", f"Файл сохранён:\n{file_path}")
+        QMessageBox.information(self, "Сохранённые результаты", f"Файл сохранён:\n{file_path}")
 
     def delete_selected(self) -> None:
-        row = self.table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Результаты", "Выберите результат.")
+        result_id = self._selected_result_id()
+        if result_id is None:
+            QMessageBox.information(self, "Сохранённые результаты", "Выберите результат для удаления.")
             return
-        item = self.table.item(row, 0)
-        if not item:
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Сохранённые результаты")
+        message_box.setText("Удалить выбранный результат?")
+        yes_button = message_box.addButton("Да", QMessageBox.ButtonRole.YesRole)
+        no_button = message_box.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+        message_box.setDefaultButton(no_button)
+        message_box.exec()
+
+        if message_box.clickedButton() != yes_button:
             return
-        result_id = int(item.data(Qt.ItemDataRole.UserRole))
-        answer = QMessageBox.question(self, "Результаты", "Удалить выбранный результат?")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+
         model_service.remove_result(result_id)
         self.reload()
 
