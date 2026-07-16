@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -18,6 +19,22 @@ STUB_MODE = False
 LOG_FILE = "chatlist.log"
 
 logger = logging.getLogger("chatlist.network")
+
+_SENSITIVE_PATTERNS = [
+    (re.compile(r"Authorization\s*:\s*Bearer\s+\S+", re.IGNORECASE), "Authorization: Bearer [СКРЫТО]"),
+    (re.compile(r"Bearer\s+sk[-_a-zA-Z0-9]+", re.IGNORECASE), "Bearer [СКРЫТО]"),
+    (re.compile(r"sk-or-v1-[a-zA-Z0-9]+"), "[СКРЫТО]"),
+    (re.compile(r"sk-[a-zA-Z0-9]+"), "[СКРЫТО]"),
+    (re.compile(r"gsk_[a-zA-Z0-9]+"), "[СКРЫТО]"),
+    (re.compile(r"(OPENROUTER_API_KEY|OPENAI_API_KEY|DEEPSEEK_API_KEY|GROQ_API_KEY)\s*=\s*\S+"), r"\1=[СКРЫТО]"),
+]
+
+
+def _sanitize_log_text(text: str) -> str:
+    sanitized = text
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        sanitized = pattern.sub(replacement, sanitized)
+    return sanitized
 
 
 def setup_logging() -> None:
@@ -60,8 +77,9 @@ def _log_request(model_name: str, prompt: str, success: bool, details: str) -> N
         return
     setup_logging()
     status = "OK" if success else "ERROR"
-    preview = prompt.replace("\n", " ")[:120]
-    logger.info("%s | %s | %s | %s", status, model_name, preview, details)
+    preview = _sanitize_log_text(prompt.replace("\n", " ")[:120])
+    safe_details = _sanitize_log_text(details)
+    logger.info("%s | %s | %s | %s", status, model_name, preview, safe_details)
 
 
 def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> RequestResult:
@@ -108,7 +126,7 @@ def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> Request
             model_id=model.id,
         )
     except httpx.HTTPStatusError as exc:
-        message = f"Ошибка HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+        message = f"Ошибка HTTP {exc.response.status_code}: {_sanitize_log_text(exc.response.text[:200])}"
         _log_request(model.name, prompt, False, message)
         return RequestResult(
             model_name=model.name,
@@ -117,7 +135,7 @@ def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> Request
             model_id=model.id,
         )
     except (httpx.RequestError, ValueError, KeyError) as exc:
-        message = f"Ошибка: {exc}"
+        message = f"Ошибка: {_sanitize_log_text(str(exc))}"
         _log_request(model.name, prompt, False, message)
         return RequestResult(
             model_name=model.name,

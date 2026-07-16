@@ -11,7 +11,7 @@ import db
 from dotenv import load_dotenv
 
 DEFAULT_SETTINGS: dict[str, str] = {
-    "request_timeout": "30",
+    "request_timeout": "90",
     "db_path": "chatlist.db",
     "default_tags": "",
     "log_requests": "1",
@@ -144,9 +144,9 @@ def set_setting_value(key: str, value: str) -> None:
 
 def get_request_timeout() -> float:
     try:
-        return float(get_setting_value("request_timeout", "30"))
+        return float(get_setting_value("request_timeout", "90"))
     except ValueError:
-        return 30.0
+        return 90.0
 
 
 def get_default_tags() -> str | None:

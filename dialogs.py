@@ -435,25 +435,24 @@ class SettingsDialog(QDialog):
 
         self.timeout_input = QSpinBox()
         self.timeout_input.setRange(5, 300)
-        self.timeout_input.setSuffix(" сек")
-        self.timeout_input.setValue(int(float(model_service.get_setting_value("request_timeout", "30"))))
+        self.timeout_input.setValue(int(float(model_service.get_setting_value("request_timeout", "90"))))
 
         self.db_path_input = QLineEdit(model_service.get_setting_value("db_path", "chatlist.db"))
         self.default_tags_input = QLineEdit(model_service.get_setting_value("default_tags", ""))
-        self.log_checkbox = QCheckBox("Логировать запросы в chatlist.log")
+        self.log_checkbox = QCheckBox("Записывать историю запросов в файл chatlist.log")
         self.log_checkbox.setChecked(model_service.is_logging_enabled())
 
         form = QFormLayout()
-        form.addRow("Таймаут запросов:", self.timeout_input)
-        form.addRow("Путь к БД:", self.db_path_input)
+        form.addRow("Время ожидания ответа, сек.:", self.timeout_input)
+        form.addRow("Файл базы данных:", self.db_path_input)
         form.addRow("Теги по умолчанию:", self.default_tags_input)
         form.addRow("", self.log_checkbox)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Сохранить", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Отменить", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.clicked.connect(self.save)
+        cancel_button.clicked.connect(self.reject)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
