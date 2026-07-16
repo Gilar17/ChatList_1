@@ -119,13 +119,26 @@ def list_prompts(
     query = "SELECT * FROM prompts"
     params: tuple[Any, ...] = ()
     if search:
-        query += " WHERE prompt LIKE ? OR IFNULL(tags, '') LIKE ?"
+        query += " WHERE LOWER(prompt) LIKE LOWER(?) OR LOWER(IFNULL(tags, '')) LIKE LOWER(?)"
         pattern = f"%{search}%"
         params = (pattern, pattern)
     query += f" ORDER BY {order_by} {order_dir}"
     with get_connection(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
         return [_row_to_dict(row) for row in rows]
+
+
+def update_prompt(
+    prompt_id: int,
+    prompt: str,
+    tags: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE prompts SET prompt = ?, tags = ? WHERE id = ?",
+            (prompt, tags, prompt_id),
+        )
 
 
 def delete_prompt(prompt_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:

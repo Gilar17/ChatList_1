@@ -265,6 +265,10 @@ def get_prompt_by_id(prompt_id: int) -> PromptRecord | None:
     return PromptRecord.from_row(row) if row else None
 
 
+def update_prompt_record(prompt_id: int, prompt: str, tags: str | None = None) -> None:
+    db.update_prompt(prompt_id, prompt, tags)
+
+
 def remove_prompt(prompt_id: int) -> None:
     db.delete_prompt(prompt_id)
 

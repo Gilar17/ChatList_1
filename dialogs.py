@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -28,11 +29,62 @@ from PyQt6.QtWidgets import (
 import models as model_service
 
 
+class PromptEditDialog(QDialog):
+    def __init__(self, prompt: model_service.PromptRecord, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._prompt_id = prompt.id
+        self.setWindowTitle("Редактирование промта")
+        self.setMinimumSize(520, 360)
+
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setFont(QFont("Segoe UI", 10))
+        self.prompt_input.setMinimumHeight(180)
+        self.prompt_input.setPlainText(prompt.prompt)
+
+        self.tags_input = QLineEdit()
+        self.tags_input.setFont(QFont("Segoe UI", 10))
+        self.tags_input.setText(prompt.tags or "")
+
+        form = QFormLayout()
+        form.addRow("Промт:", self.prompt_input)
+        form.addRow("Теги:", self.tags_input)
+
+        save_button = QPushButton("Сохранить")
+        cancel_button = QPushButton("Отменить")
+        save_button.clicked.connect(self.save)
+        cancel_button.clicked.connect(self.reject)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addLayout(form)
+        layout.addLayout(buttons)
+
+    def save(self) -> None:
+        prompt_text = self.prompt_input.toPlainText().strip()
+        if not prompt_text:
+            QMessageBox.warning(self, "Редактирование промта", "Введите текст промта.")
+            return
+
+        tags = self.tags_input.text().strip() or None
+        model_service.update_prompt_record(self._prompt_id, prompt_text, tags)
+        self.accept()
+
+
 class PromptsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Промты")
-        self.resize(820, 480)
+        self.setWindowTitle("Управление промтами")
+        self.resize(900, 520)
+
+        self._sort_column = 1
+        self._sort_desc = True
+        self._order_by = "created_at"
+        self._order_dir = "DESC"
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск по тексту или тегам...")
@@ -40,87 +92,142 @@ class PromptsDialog(QDialog):
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["ID", "Дата", "Промт", "Теги"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 50)
+        self.table.setColumnWidth(1, 170)
+        self.table.setColumnWidth(3, 140)
         self.table.setAlternatingRowColors(True)
-        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setSortingEnabled(False)
         self.table.horizontalHeader().sectionClicked.connect(self.on_sort)
+        self.table.itemSelectionChanged.connect(self._update_edit_button_state)
+        self.table.cellDoubleClicked.connect(self.on_edit_selected)
 
-        delete_button = QPushButton("Удалить выбранный")
-        delete_button.clicked.connect(self.delete_selected)
+        self.edit_button = QPushButton("Редактировать")
+        self.edit_button.setEnabled(False)
+        self.edit_button.clicked.connect(self.on_edit_selected)
 
-        close_button = QPushButton("Закрыть")
-        close_button.clicked.connect(self.accept)
+        self.delete_button = QPushButton("Удалить")
+        self.delete_button.clicked.connect(self.delete_selected)
+
+        self.close_button = QPushButton("Закрыть")
+        self.close_button.clicked.connect(self.accept)
 
         buttons = QHBoxLayout()
-        buttons.addWidget(delete_button)
+        buttons.addWidget(self.edit_button)
+        buttons.addWidget(self.delete_button)
         buttons.addStretch()
-        buttons.addWidget(close_button)
+        buttons.addWidget(self.close_button)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.search_input)
         layout.addWidget(self.table)
         layout.addLayout(buttons)
 
-        self._sort_column = 1
-        self._sort_desc = True
         self.reload()
 
-    def on_sort(self, column: int) -> None:
+    def _sort_field(self) -> tuple[str, str]:
         mapping = {0: "id", 1: "created_at", 2: "prompt", 3: "tags"}
-        field = mapping.get(column, "created_at")
+        field = mapping.get(self._sort_column, "created_at")
+        return field, "DESC" if self._sort_desc else "ASC"
+
+    def on_sort(self, column: int) -> None:
         if self._sort_column == column:
             self._sort_desc = not self._sort_desc
         else:
             self._sort_column = column
-            self._sort_desc = True
-        self.reload(order_by=field, order_dir="DESC" if self._sort_desc else "ASC")
+            self._sort_desc = column != 2
+        self._order_by, self._order_dir = self._sort_field()
+        self.reload()
 
-    def reload(self, order_by: str = "created_at", order_dir: str = "DESC") -> None:
+    def reload(self, selected_id: int | None = None) -> None:
         search = self.search_input.text().strip() or None
         rows = model_service.load_prompts(search=search)
-        if order_by == "created_at":
-            rows.sort(key=lambda item: item.created_at, reverse=order_dir == "DESC")
-        elif order_by == "prompt":
-            rows.sort(key=lambda item: item.prompt.lower(), reverse=order_dir == "DESC")
-        elif order_by == "tags":
-            rows.sort(key=lambda item: (item.tags or "").lower(), reverse=order_dir == "DESC")
-        elif order_by == "id":
-            rows.sort(key=lambda item: item.id, reverse=order_dir == "DESC")
 
-        self.table.setSortingEnabled(False)
+        if self._order_by == "created_at":
+            rows.sort(key=lambda item: item.created_at, reverse=self._order_dir == "DESC")
+        elif self._order_by == "prompt":
+            rows.sort(key=lambda item: item.prompt.lower(), reverse=self._order_dir == "DESC")
+        elif self._order_by == "tags":
+            rows.sort(key=lambda item: (item.tags or "").lower(), reverse=self._order_dir == "DESC")
+        elif self._order_by == "id":
+            rows.sort(key=lambda item: item.id, reverse=self._order_dir == "DESC")
+
         self.table.setRowCount(len(rows))
+        selected_row = -1
         for index, row in enumerate(rows):
+            if selected_id is not None and row.id == selected_id:
+                selected_row = index
             for col, value in enumerate([row.id, row.created_at, row.prompt, row.tags or ""]):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.ItemDataRole.UserRole, row.id)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == 2:
+                    item.setToolTip(row.prompt)
                 self.table.setItem(index, col, item)
-        self.table.setSortingEnabled(True)
 
-    def delete_selected(self) -> None:
+        if selected_row >= 0:
+            self.table.selectRow(selected_row)
+        self._update_edit_button_state()
+
+    def _selected_prompt_id(self) -> int | None:
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Промты", "Выберите промт для удаления.")
-            return
-
+            return None
         item = self.table.item(row, 0)
         if not item:
+            return None
+        return int(item.data(Qt.ItemDataRole.UserRole))
+
+    def _update_edit_button_state(self) -> None:
+        self.edit_button.setEnabled(self._selected_prompt_id() is not None)
+
+    def _sync_main_prompt_list(self) -> None:
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "load_prompt_list"):
+            parent.load_prompt_list()
+
+    def on_edit_selected(self, *_args: object) -> None:
+        prompt_id = self._selected_prompt_id()
+        if prompt_id is None:
+            QMessageBox.information(self, "Управление промтами", "Выберите промт для редактирования.")
             return
 
-        prompt_id = int(item.data(Qt.ItemDataRole.UserRole))
-        answer = QMessageBox.question(
-            self,
-            "Промты",
-            "Удалить выбранный промт? Сохранённые результаты останутся в базе.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        prompt = model_service.get_prompt_by_id(prompt_id)
+        if prompt is None:
+            return
+
+        dialog = PromptEditDialog(prompt, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.reload(selected_id=prompt_id)
+        self._sync_main_prompt_list()
+
+    def delete_selected(self) -> None:
+        prompt_id = self._selected_prompt_id()
+        if prompt_id is None:
+            QMessageBox.information(self, "Управление промтами", "Выберите промт для удаления.")
+            return
+
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Управление промтами")
+        message_box.setText("Удалить выбранный промт?")
+        yes_button = message_box.addButton("Да", QMessageBox.ButtonRole.YesRole)
+        no_button = message_box.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+        message_box.setDefaultButton(no_button)
+        message_box.exec()
+
+        if message_box.clickedButton() != yes_button:
             return
 
         model_service.remove_prompt(prompt_id)
         self.reload()
+        self._sync_main_prompt_list()
 
 
 class ModelEditDialog(QDialog):
