@@ -264,6 +264,12 @@ class ModelEditDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if save_button is not None:
+            save_button.setText("Сохранить")
+        if cancel_button is not None:
+            cancel_button.setText("Отмена")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
@@ -283,22 +289,26 @@ class ModelEditDialog(QDialog):
 
 
 class ModelsDialog(QDialog):
+    COLUMN_WIDTHS = [50, 150, 180, 280, 140, 100, 70, 160]
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Модели")
-        self.resize(900, 480)
+        self.setWindowTitle("Управление моделями")
+        self.resize(1100, 480)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
-            ["ID", "Название", "API ID", "Ключ (.env)", "Тип", "Активна"]
+            ["ID", "Название", "API ID", "URL API", "Ключ (.env)", "Тип", "Активна", "Дата создания"]
         )
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        for column in range(8):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            self.table.setColumnWidth(column, self.COLUMN_WIDTHS[column])
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
 
         add_button = QPushButton("Добавить")
         edit_button = QPushButton("Изменить")
@@ -325,6 +335,16 @@ class ModelsDialog(QDialog):
         layout.addLayout(buttons)
         self.reload()
 
+    @staticmethod
+    def _format_created_at(created_at: str | None) -> str:
+        if not created_at:
+            return "—"
+        try:
+            parsed = datetime.fromisoformat(created_at)
+            return parsed.strftime("%d.%m.%Y %H:%M:%S")
+        except ValueError:
+            return "—"
+
     def reload(self) -> None:
         rows = model_service.load_models()
         self.table.setRowCount(len(rows))
@@ -333,9 +353,11 @@ class ModelsDialog(QDialog):
                 row.id,
                 row.name,
                 row.api_id,
+                row.api_url,
                 row.api_key_env_var,
                 row.model_type or "",
                 "Да" if row.is_active else "Нет",
+                self._format_created_at(row.created_at),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -395,12 +417,15 @@ class ModelsDialog(QDialog):
         if model_id is None:
             QMessageBox.information(self, "Модели", "Выберите модель.")
             return
-        answer = QMessageBox.question(
-            self,
-            "Модели",
-            "Удалить выбранную модель? Сохранённые результаты останутся в базе.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("Модели")
+        message_box.setText("Удалить выбранную модель? Сохранённые результаты останутся в базе.")
+        yes_button = message_box.addButton("Да", QMessageBox.ButtonRole.YesRole)
+        no_button = message_box.addButton("Нет", QMessageBox.ButtonRole.NoRole)
+        message_box.setDefaultButton(no_button)
+        message_box.exec()
+
+        if message_box.clickedButton() != yes_button:
             return
         model_service.remove_model(model_id)
         self.reload()

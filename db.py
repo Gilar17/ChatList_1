@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS models (
     api_id          TEXT    NOT NULL,
     api_key_env_var TEXT    NOT NULL,
     is_active       INTEGER NOT NULL DEFAULT 1,
-    model_type      TEXT
+    model_type      TEXT,
+    created_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS results (
@@ -80,9 +81,16 @@ def get_connection(db_path: Path | str = DEFAULT_DB_PATH) -> Iterator[sqlite3.Co
         conn.close()
 
 
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    model_columns = {row[1] for row in conn.execute("PRAGMA table_info(models)").fetchall()}
+    if "created_at" not in model_columns:
+        conn.execute("ALTER TABLE models ADD COLUMN created_at TEXT")
+
+
 def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA_SQL)
+        _migrate_schema(conn)
 
 
 # --- prompts ---
@@ -161,10 +169,10 @@ def create_model(
     with get_connection(db_path) as conn:
         cursor = conn.execute(
             """
-            INSERT INTO models (name, api_url, api_id, api_key_env_var, is_active, model_type)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO models (name, api_url, api_id, api_key_env_var, is_active, model_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, api_url, api_id, api_key_env_var, is_active, model_type),
+            (name, api_url, api_id, api_key_env_var, is_active, model_type, _now_iso()),
         )
         return int(cursor.lastrowid)
 

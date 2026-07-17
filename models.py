@@ -50,6 +50,7 @@ class ModelRecord:
     api_key_env_var: str
     is_active: int
     model_type: str | None = None
+    created_at: str | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> ModelRecord:
@@ -61,6 +62,7 @@ class ModelRecord:
             api_key_env_var=str(row["api_key_env_var"]),
             is_active=int(row["is_active"]),
             model_type=row.get("model_type"),
+            created_at=row.get("created_at"),
         )
 
 
@@ -248,6 +250,7 @@ def sync_models_to_openrouter() -> None:
             api_key_env_var="OPENROUTER_API_KEY",
             is_active=model.is_active,
             model_type="openrouter",
+            created_at=model.created_at,
         )
         edit_model(updated)
 
