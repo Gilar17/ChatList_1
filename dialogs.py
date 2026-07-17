@@ -34,34 +34,68 @@ from markdown_viewer import format_received_at, show_response_markdown
 
 
 class PromptEditDialog(QDialog):
-    def __init__(self, prompt: model_service.PromptRecord, parent: QWidget | None = None) -> None:
+    MODE_CREATE = "create"
+    MODE_EDIT = "edit"
+    MODE_VIEW = "view"
+
+    def __init__(
+        self,
+        prompt: model_service.PromptRecord | None = None,
+        parent: QWidget | None = None,
+        mode: str | None = None,
+    ) -> None:
         super().__init__(parent)
-        self._prompt_id = prompt.id
-        self.setWindowTitle("Редактирование промта")
+        if mode is None:
+            mode = self.MODE_EDIT if prompt is not None else self.MODE_CREATE
+
+        self._mode = mode
+        self._prompt_id = prompt.id if prompt is not None else None
+
+        titles = {
+            self.MODE_CREATE: "Новый промт",
+            self.MODE_EDIT: "Редактирование промта",
+            self.MODE_VIEW: "Просмотр промта",
+        }
+        self.setWindowTitle(titles.get(mode, "Промт"))
         self.setMinimumSize(520, 360)
 
         self.prompt_input = QTextEdit()
         self.prompt_input.setFont(QFont("Segoe UI", 10))
         self.prompt_input.setMinimumHeight(180)
-        self.prompt_input.setPlainText(prompt.prompt)
+        if prompt is not None:
+            self.prompt_input.setPlainText(prompt.prompt)
 
         self.tags_input = QLineEdit()
         self.tags_input.setFont(QFont("Segoe UI", 10))
-        self.tags_input.setText(prompt.tags or "")
+        if prompt is not None:
+            self.tags_input.setText(prompt.tags or "")
 
         form = QFormLayout()
+        if prompt is not None and mode == self.MODE_VIEW:
+            id_label = QLabel(str(prompt.id))
+            date_label = QLabel(prompt.created_at)
+            form.addRow("ID:", id_label)
+            form.addRow("Дата:", date_label)
         form.addRow("Промт:", self.prompt_input)
         form.addRow("Теги:", self.tags_input)
 
-        save_button = QPushButton("Сохранить")
-        cancel_button = QPushButton("Отменить")
-        save_button.clicked.connect(self.save)
-        cancel_button.clicked.connect(self.reject)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        buttons.addWidget(save_button)
-        buttons.addWidget(cancel_button)
+        if mode == self.MODE_VIEW:
+            self.prompt_input.setReadOnly(True)
+            self.tags_input.setReadOnly(True)
+            close_button = QPushButton("Закрыть")
+            close_button.clicked.connect(self.reject)
+            buttons = QHBoxLayout()
+            buttons.addStretch()
+            buttons.addWidget(close_button)
+        else:
+            save_button = QPushButton("Сохранить")
+            cancel_button = QPushButton("Отменить")
+            save_button.clicked.connect(self.save)
+            cancel_button.clicked.connect(self.reject)
+            buttons = QHBoxLayout()
+            buttons.addStretch()
+            buttons.addWidget(save_button)
+            buttons.addWidget(cancel_button)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -71,11 +105,15 @@ class PromptEditDialog(QDialog):
     def save(self) -> None:
         prompt_text = self.prompt_input.toPlainText().strip()
         if not prompt_text:
-            QMessageBox.warning(self, "Редактирование промта", "Введите текст промта.")
+            title = "Новый промт" if self._mode == self.MODE_CREATE else "Редактирование промта"
+            QMessageBox.warning(self, title, "Введите текст промта.")
             return
 
         tags = self.tags_input.text().strip() or None
-        model_service.update_prompt_record(self._prompt_id, prompt_text, tags)
+        if self._mode == self.MODE_CREATE:
+            model_service.save_prompt(prompt_text, tags)
+        else:
+            model_service.update_prompt_record(self._prompt_id, prompt_text, tags)
         self.accept()
 
 
@@ -108,22 +146,28 @@ class PromptsDialog(QDialog):
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setSortingEnabled(False)
         self.table.horizontalHeader().sectionClicked.connect(self.on_sort)
-        self.table.itemSelectionChanged.connect(self._update_edit_button_state)
         self.table.cellDoubleClicked.connect(self.on_edit_selected)
 
+        self.create_button = QPushButton("Создать")
+        self.open_button = QPushButton("Открыть")
         self.edit_button = QPushButton("Редактировать")
-        self.edit_button.setEnabled(False)
-        self.edit_button.clicked.connect(self.on_edit_selected)
-
         self.delete_button = QPushButton("Удалить")
-        self.delete_button.clicked.connect(self.delete_selected)
-
+        self.refresh_button = QPushButton("Обновить")
         self.close_button = QPushButton("Закрыть")
+
+        self.create_button.clicked.connect(self.create_prompt)
+        self.open_button.clicked.connect(self.open_selected)
+        self.edit_button.clicked.connect(self.on_edit_selected)
+        self.delete_button.clicked.connect(self.delete_selected)
+        self.refresh_button.clicked.connect(self.refresh_table)
         self.close_button.clicked.connect(self.accept)
 
         buttons = QHBoxLayout()
+        buttons.addWidget(self.create_button)
+        buttons.addWidget(self.open_button)
         buttons.addWidget(self.edit_button)
         buttons.addWidget(self.delete_button)
+        buttons.addWidget(self.refresh_button)
         buttons.addStretch()
         buttons.addWidget(self.close_button)
 
@@ -176,7 +220,6 @@ class PromptsDialog(QDialog):
 
         if selected_row >= 0:
             self.table.selectRow(selected_row)
-        self._update_edit_button_state()
 
     def _selected_prompt_id(self) -> int | None:
         row = self.table.currentRow()
@@ -187,29 +230,56 @@ class PromptsDialog(QDialog):
             return None
         return int(item.data(Qt.ItemDataRole.UserRole))
 
-    def _update_edit_button_state(self) -> None:
-        self.edit_button.setEnabled(self._selected_prompt_id() is not None)
+    def _require_selected_prompt(self, action: str) -> model_service.PromptRecord | None:
+        prompt_id = self._selected_prompt_id()
+        if prompt_id is None:
+            QMessageBox.information(
+                self,
+                "Управление промтами",
+                f"Выберите промт для {action}.",
+            )
+            return None
+
+        prompt = model_service.get_prompt_by_id(prompt_id)
+        if prompt is None:
+            QMessageBox.information(self, "Управление промтами", "Выбранный промт не найден.")
+            return None
+        return prompt
 
     def _sync_main_prompt_list(self) -> None:
         parent = self.parent()
         if parent is not None and hasattr(parent, "load_prompt_list"):
             parent.load_prompt_list()
 
-    def on_edit_selected(self, *_args: object) -> None:
-        prompt_id = self._selected_prompt_id()
-        if prompt_id is None:
-            QMessageBox.information(self, "Управление промтами", "Выберите промт для редактирования.")
-            return
-
-        prompt = model_service.get_prompt_by_id(prompt_id)
-        if prompt is None:
-            return
-
-        dialog = PromptEditDialog(prompt, self)
+    def create_prompt(self) -> None:
+        dialog = PromptEditDialog(parent=self, mode=PromptEditDialog.MODE_CREATE)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self.reload(selected_id=prompt_id)
+        self.reload()
+        self._sync_main_prompt_list()
+
+    def open_selected(self, *_args: object) -> None:
+        prompt = self._require_selected_prompt("просмотра")
+        if prompt is None:
+            return
+
+        dialog = PromptEditDialog(prompt, self, mode=PromptEditDialog.MODE_VIEW)
+        dialog.exec()
+
+    def refresh_table(self) -> None:
+        self.reload(selected_id=self._selected_prompt_id())
+
+    def on_edit_selected(self, *_args: object) -> None:
+        prompt = self._require_selected_prompt("редактирования")
+        if prompt is None:
+            return
+
+        dialog = PromptEditDialog(prompt, self, mode=PromptEditDialog.MODE_EDIT)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self.reload(selected_id=prompt.id)
         self._sync_main_prompt_list()
 
     def delete_selected(self) -> None:
