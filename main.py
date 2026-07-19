@@ -5,10 +5,9 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont, QIcon
+from PyQt6.QtGui import QCursor, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -19,7 +18,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QStyleFactory,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -30,7 +28,9 @@ from PyQt6.QtWidgets import (
 import db
 import models as model_service
 import network
+import appearance
 from dialogs import (
+    AboutDialog,
     ModelsDialog,
     PromptImprovementDialog,
     PromptsDialog,
@@ -39,16 +39,11 @@ from dialogs import (
 )
 from markdown_viewer import format_received_at, show_response_markdown
 
-APP_ICON_PATH = Path(__file__).resolve().parent / "app.ico"
+APP_ICON_PATH = appearance.APP_ICON_PATH
 
 
 def load_app_icon() -> QIcon:
-    """Загружает app.ico из папки проекта; при отсутствии файла возвращает пустую иконку."""
-    if APP_ICON_PATH.is_file():
-        icon = QIcon(str(APP_ICON_PATH))
-        if not icon.isNull():
-            return icon
-    return QIcon()
+    return appearance.load_app_icon()
 
 
 @dataclass
@@ -132,25 +127,18 @@ class MainWindow(QMainWindow):
 
         self._create_menu()
 
-        body_font = QFont("Segoe UI", 10)
-        button_font = QFont("Segoe UI", 9)
-
         prompt_caption = QLabel("Промт:")
-        prompt_caption.setFont(body_font)
 
         self.prompt_combo = QComboBox()
-        self.prompt_combo.setFont(body_font)
         self.prompt_combo.setEditable(True)
         self.prompt_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.prompt_combo.currentIndexChanged.connect(self.on_prompt_combo_changed)
 
         self.send_button = QPushButton("Отправить")
-        self.send_button.setFont(button_font)
         self.send_button.setFixedWidth(120)
         self.send_button.clicked.connect(self.on_send)
 
         self.improve_prompt_button = QPushButton("Улучшить промт")
-        self.improve_prompt_button.setFont(button_font)
         self.improve_prompt_button.setFixedWidth(140)
         self.improve_prompt_button.clicked.connect(self.on_improve_prompt)
 
@@ -162,13 +150,11 @@ class MainWindow(QMainWindow):
         prompt_row.addWidget(self.send_button)
 
         self.prompt_input = QTextEdit()
-        self.prompt_input.setFont(body_font)
         self.prompt_input.setPlaceholderText("Введите промт или выберите из списка...")
         self.prompt_input.setMinimumHeight(140)
         self.prompt_input.textChanged.connect(self.on_prompt_changed)
 
         self.results_table = QTableWidget(0, 3)
-        self.results_table.setFont(body_font)
         self.results_table.setHorizontalHeaderLabels(["Выбрать", "Модель", "Ответ"])
         self.results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
@@ -182,17 +168,14 @@ class MainWindow(QMainWindow):
         self.results_table.cellDoubleClicked.connect(self.on_open_response)
 
         self.save_selected_button = QPushButton("Сохранить выбранные")
-        self.save_selected_button.setFont(button_font)
         self.save_selected_button.setEnabled(False)
         self.save_selected_button.clicked.connect(self.on_save_selected)
 
         self.open_button = QPushButton("Открыть")
-        self.open_button.setFont(button_font)
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.on_open_response)
 
         self.clear_button = QPushButton("Очистить")
-        self.clear_button.setFont(button_font)
         self.clear_button.clicked.connect(self.on_clear)
 
         action_buttons = QHBoxLayout()
@@ -203,7 +186,6 @@ class MainWindow(QMainWindow):
         action_buttons.addStretch()
 
         self.status_label = QLabel("Готово. Введите промт и нажмите «Отправить».")
-        self.status_label.setFont(QFont("Segoe UI", 9))
         self.status_label.setWordWrap(True)
 
         central = QWidget()
@@ -219,10 +201,13 @@ class MainWindow(QMainWindow):
 
         self.load_prompt_list()
         self._update_save_button_state()
+        self.refresh_appearance()
+
+    def refresh_appearance(self) -> None:
+        appearance.apply_fonts_to_widget(self)
 
     def _create_menu(self) -> None:
         menu_bar = self.menuBar()
-        menu_bar.setFont(QFont("Segoe UI", 9))
 
         prompts_menu = menu_bar.addMenu("Промты")
         prompts_menu.addAction("Управление промтами", self.open_prompts_dialog)
@@ -235,6 +220,13 @@ class MainWindow(QMainWindow):
 
         settings_menu = menu_bar.addMenu("Настройки")
         settings_menu.addAction("Параметры программы", self.open_settings_dialog)
+
+        help_menu = menu_bar.addMenu("Справка")
+        help_menu.addAction("О программе", self.open_about_dialog)
+
+    def open_about_dialog(self) -> None:
+        dialog = AboutDialog(self)
+        dialog.exec()
 
     def open_prompts_dialog(self) -> None:
         dialog = PromptsDialog(self)
@@ -547,7 +539,7 @@ def main() -> None:
     network.setup_logging()
 
     app = QApplication(sys.argv)
-    app.setStyle("Windows11" if "Windows11" in QStyleFactory.keys() else "Fusion")
+    appearance.apply_app_appearance(app)
 
     app_icon = load_app_icon()
     if not app_icon.isNull():

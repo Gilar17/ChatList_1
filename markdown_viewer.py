@@ -6,7 +6,6 @@ from datetime import datetime
 
 import markdown
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -15,6 +14,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+import appearance
 
 MARKDOWN_EXTENSIONS = [
     "extra",
@@ -153,12 +154,10 @@ class MarkdownViewerDialog(QDialog):
         self.setMinimumSize(640, 480)
 
         self.browser = QTextBrowser()
-        self.browser.setFont(QFont("Segoe UI", 10))
         self.browser.setOpenExternalLinks(True)
         self.browser.setHtml(render_markdown_to_html(markdown_text))
 
         close_button = QPushButton("Закрыть")
-        close_button.setFont(QFont("Segoe UI", 9))
         close_button.setFixedWidth(100)
         close_button.clicked.connect(self.accept)
 
@@ -171,6 +170,7 @@ class MarkdownViewerDialog(QDialog):
         layout.setSpacing(12)
         layout.addWidget(self.browser, stretch=1)
         layout.addLayout(buttons)
+        appearance.apply_fonts_to_widget(self)
 
 
 def show_response_markdown(

@@ -17,6 +17,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "default_tags": "",
     "log_requests": "1",
     "prompt_assistant_model_id": "",
+    "theme": "light",
+    "font_size": "10",
 }
 
 DEFAULT_SEED_MODELS: list[dict[str, Any]] = [
@@ -160,6 +162,19 @@ def get_default_tags() -> str | None:
 
 def is_logging_enabled() -> bool:
     return get_setting_value("log_requests", "1") == "1"
+
+
+def get_theme() -> str:
+    theme = get_setting_value("theme", "light").strip().lower()
+    return theme if theme in {"light", "dark"} else "light"
+
+
+def get_font_size() -> int:
+    try:
+        size = int(get_setting_value("font_size", "10"))
+    except ValueError:
+        size = 10
+    return max(8, min(24, size))
 
 
 @dataclass

@@ -34,7 +34,12 @@ from PyQt6.QtWidgets import (
 
 import models as model_service
 import network
+import appearance
 from markdown_viewer import format_received_at, show_response_markdown
+
+
+def _apply_dialog_appearance(dialog: QWidget) -> None:
+    appearance.apply_fonts_to_widget(dialog)
 
 
 class PromptEditDialog(QDialog):
@@ -105,6 +110,7 @@ class PromptEditDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.addLayout(form)
         layout.addLayout(buttons)
+        _apply_dialog_appearance(self)
 
     def save(self) -> None:
         prompt_text = self.prompt_input.toPlainText().strip()
@@ -181,6 +187,7 @@ class PromptsDialog(QDialog):
         layout.addLayout(buttons)
 
         self.reload()
+        _apply_dialog_appearance(self)
 
     def _sort_field(self) -> tuple[str, str]:
         mapping = {0: "id", 1: "created_at", 2: "prompt", 3: "tags"}
@@ -350,6 +357,7 @@ class ModelEditDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+        _apply_dialog_appearance(self)
 
     def get_data(self) -> dict[str, object]:
         return {
@@ -408,6 +416,7 @@ class ModelsDialog(QDialog):
         layout.addWidget(self.table)
         layout.addLayout(buttons)
         self.reload()
+        _apply_dialog_appearance(self)
 
     @staticmethod
     def _format_created_at(created_at: str | None) -> str:
@@ -601,6 +610,7 @@ class ResultsDialog(QDialog):
         layout.addLayout(buttons)
         self.reload()
         self.update_column_widths()
+        _apply_dialog_appearance(self)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1094,6 +1104,7 @@ class PromptImprovementDialog(QDialog):
         layout.addLayout(buttons)
 
         self._update_options_visibility()
+        _apply_dialog_appearance(self)
 
     def applied_text(self) -> str | None:
         return self._applied_text
@@ -1326,6 +1337,19 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Настройки")
         self.setMinimumWidth(420)
+        self._applied_theme = model_service.get_theme()
+        self._applied_font_size = model_service.get_font_size()
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Светлая", "light")
+        self.theme_combo.addItem("Тёмная", "dark")
+        current_theme_index = self.theme_combo.findData(self._applied_theme)
+        self.theme_combo.setCurrentIndex(current_theme_index if current_theme_index >= 0 else 0)
+
+        self.font_size_input = QSpinBox()
+        self.font_size_input.setRange(8, 24)
+        self.font_size_input.setSingleStep(1)
+        self.font_size_input.setValue(self._applied_font_size)
 
         self.timeout_input = QSpinBox()
         self.timeout_input.setRange(5, 300)
@@ -1340,6 +1364,8 @@ class SettingsDialog(QDialog):
         self._populate_assistant_models()
 
         form = QFormLayout()
+        form.addRow("Тема оформления:", self.theme_combo)
+        form.addRow("Размер шрифта:", self.font_size_input)
         form.addRow("Время ожидания ответа, сек.:", self.timeout_input)
         form.addRow("Файл базы данных:", self.db_path_input)
         form.addRow("Теги по умолчанию:", self.default_tags_input)
@@ -1348,13 +1374,14 @@ class SettingsDialog(QDialog):
 
         buttons = QDialogButtonBox()
         save_button = buttons.addButton("Сохранить", QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel_button = buttons.addButton("Отменить", QDialogButtonBox.ButtonRole.RejectRole)
+        cancel_button = buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
         save_button.clicked.connect(self.save)
-        cancel_button.clicked.connect(self.reject)
+        cancel_button.clicked.connect(self.cancel)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+        _apply_dialog_appearance(self)
 
     def _populate_assistant_models(self) -> None:
         self.assistant_model_combo.clear()
@@ -1368,7 +1395,19 @@ class SettingsDialog(QDialog):
                 selected_index = index
         self.assistant_model_combo.setCurrentIndex(selected_index)
 
+    def cancel(self) -> None:
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            appearance.apply_app_appearance(app)
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "refresh_appearance"):
+                parent.refresh_appearance()
+        self.reject()
+
     def save(self) -> None:
+        theme = self.theme_combo.currentData()
+        model_service.set_setting_value("theme", str(theme or "light"))
+        model_service.set_setting_value("font_size", str(self.font_size_input.value()))
         model_service.set_setting_value("request_timeout", str(self.timeout_input.value()))
         model_service.set_setting_value("db_path", self.db_path_input.text().strip() or "chatlist.db")
         model_service.set_setting_value("default_tags", self.default_tags_input.text().strip())
@@ -1376,4 +1415,120 @@ class SettingsDialog(QDialog):
 
         model_id = self.assistant_model_combo.currentData()
         model_service.set_prompt_assistant_model_id(int(model_id) if model_id is not None else None)
+
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            appearance.apply_app_appearance(app)
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "refresh_appearance"):
+                parent.refresh_appearance()
         self.accept()
+
+
+class AboutDialog(QDialog):
+    FEATURES_TEXT = (
+        "• отправка промпта нескольким моделям одновременно\n"
+        "• сравнение и сохранение результатов\n"
+        "• управление промптами и моделями\n"
+        "• AI-ассистент для улучшения промптов\n"
+        "• создание альтернативных и адаптированных вариантов промпта\n"
+        "• экспорт результатов в Markdown и JSON\n"
+        "• настройка темы оформления и размера шрифта"
+    )
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("О программе")
+        self.setMinimumSize(560, 720)
+        self.resize(560, 720)
+
+        app_icon = appearance.load_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
+
+        selectable = Qt.TextInteractionFlag.TextSelectableByMouse
+
+        self.title_label = QLabel("ChatList")
+        self.title_label.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.title_label.setTextInteractionFlags(selectable)
+
+        self.version_label = QLabel("Версия 1.0.0")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.version_label.setTextInteractionFlags(selectable)
+
+        self.description_label = QLabel(
+            "ChatList — это Python-приложение для отправки одного промпта нескольким "
+            "нейросетям и сравнения полученных ответов."
+        )
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.description_label.setTextInteractionFlags(selectable)
+
+        self.features_title_label = QLabel("Возможности:")
+        self.features_title_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.features_title_label.setTextInteractionFlags(selectable)
+
+        self.features_list_label = QLabel(self.FEATURES_TEXT)
+        self.features_list_label.setWordWrap(True)
+        self.features_list_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.features_list_label.setTextInteractionFlags(selectable)
+
+        self.tech_label = QLabel(
+            "Разработано с использованием Python, PyQt6, SQLite и OpenRouter API."
+        )
+        self.tech_label.setWordWrap(True)
+        self.tech_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
+        self.tech_label.setTextInteractionFlags(selectable)
+
+        close_button = QPushButton("Закрыть")
+        close_button.clicked.connect(self.accept)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(0)
+        layout.addWidget(self.title_label)
+        layout.addSpacing(6)
+        layout.addWidget(self.version_label)
+        layout.addSpacing(18)
+        layout.addWidget(self.description_label)
+        layout.addSpacing(14)
+        layout.addWidget(self.features_title_label)
+        layout.addSpacing(6)
+        layout.addWidget(self.features_list_label)
+        layout.addSpacing(14)
+        layout.addWidget(self.tech_label)
+        layout.addStretch()
+        layout.addLayout(buttons)
+        _apply_dialog_appearance(self)
+        self._apply_about_fonts()
+
+    def _apply_about_fonts(self) -> None:
+        base_size = appearance.get_font_size()
+        title_font = QFont(appearance.FONT_FAMILY, base_size + 3)
+        title_font.setWeight(QFont.Weight.Bold)
+        version_font = QFont(appearance.FONT_FAMILY, max(8, base_size))
+        body_font = appearance.body_font(base_size)
+
+        self.title_label.setFont(title_font)
+        self.version_label.setFont(version_font)
+        for label in (
+            self.description_label,
+            self.features_title_label,
+            self.features_list_label,
+            self.tech_label,
+        ):
+            label.setFont(body_font)
