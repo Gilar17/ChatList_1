@@ -163,10 +163,17 @@ def is_logging_enabled() -> bool:
 
 
 @dataclass
+class ImprovePromptOptions:
+    generate_alternatives: bool = True
+    adapt_to_type: bool = False
+    adaptation_type: str = "code"
+
+
+@dataclass
 class PromptAssistantResult:
     improved: str
     alternatives: list[str]
-    adaptations: dict[str, str]
+    adapted: str = ""
     raw_response: str | None = None
 
 
@@ -195,32 +202,38 @@ def get_prompt_assistant_model() -> ModelRecord | None:
     return active_models[0] if active_models else None
 
 
-def parse_prompt_assistant_response(text: str) -> PromptAssistantResult:
+def parse_prompt_assistant_response(
+    text: str,
+    *,
+    expect_alternatives: bool = True,
+    expect_adapted: bool = False,
+) -> PromptAssistantResult:
     def normalize(data: dict[str, Any]) -> PromptAssistantResult:
         improved = str(data.get("improved", "")).strip()
         if not improved:
             raise ValueError("В ответе отсутствует поле improved")
 
-        alternatives_raw = data.get("alternatives") or []
-        if not isinstance(alternatives_raw, list):
-            raise ValueError("Поле alternatives должно быть массивом")
+        alternatives: list[str] = []
+        if expect_alternatives:
+            alternatives_raw = data.get("alternatives") or []
+            if not isinstance(alternatives_raw, list):
+                raise ValueError("Поле alternatives должно быть массивом")
 
-        alternatives = [str(item).strip() for item in alternatives_raw if str(item).strip()]
-        if len(alternatives) < 2:
-            raise ValueError("Ожидается минимум 2 альтернативных варианта")
+            alternatives = [str(item).strip() for item in alternatives_raw if str(item).strip()]
+            if len(alternatives) < 2:
+                raise ValueError("Ожидается минимум 2 альтернативных варианта")
+            alternatives = alternatives[:3]
 
-        adaptations_raw = data.get("adaptations") or {}
-        adaptations: dict[str, str] = {}
-        if isinstance(adaptations_raw, dict):
-            for key, value in adaptations_raw.items():
-                text_value = str(value).strip()
-                if text_value:
-                    adaptations[str(key)] = text_value
+        adapted = ""
+        if expect_adapted:
+            adapted = str(data.get("adapted", "")).strip()
+            if not adapted:
+                raise ValueError("В ответе отсутствует поле adapted")
 
         return PromptAssistantResult(
             improved=improved,
-            alternatives=alternatives[:3],
-            adaptations=adaptations,
+            alternatives=alternatives,
+            adapted=adapted,
             raw_response=text,
         )
 

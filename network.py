@@ -262,59 +262,145 @@ def send_prompt_to_all(
     return results
 
 
-PROMPT_ASSISTANT_SYSTEM = """
-Ты — ассистент по улучшению промтов для ChatList.
-Сохраняй язык и смысл исходного промта.
-Верни только JSON без пояснений и markdown вне JSON-объекта.
-
-Формат ответа:
-{
-  "improved": "улучшенная версия промта",
-  "alternatives": ["вариант 1", "вариант 2", "вариант 3"],
-  "adaptations": {
-    "code": "адаптация для задач программирования",
-    "analysis": "адаптация для анализа",
-    "creative": "адаптация для креативных задач"
-  }
+ADAPTATION_TYPE_LABELS = {
+    "code": "Код",
+    "analysis": "Анализ",
+    "creative": "Творческий текст",
 }
 
-Требования:
-- alternatives: ровно 2 или 3 переформулировки;
-- adaptations можно опустить, если не применимо;
-- не добавляй лишний текст до или после JSON.
-""".strip()
+ADAPTATION_TYPE_HINTS = {
+    "code": "написание, объяснение или исправление программного кода",
+    "analysis": "подробный разбор, сравнение, причины и выводы",
+    "creative": "создание идей или творческого текста",
+}
 
 
-def _build_improvement_user_message(original_prompt: str) -> str:
-    return (
-        "Улучши следующий промт и предложи альтернативные формулировки.\n\n"
-        f"Исходный промт:\n{original_prompt.strip()}"
+def _build_assistant_system_prompt(options: model_service.ImprovePromptOptions) -> str:
+    format_lines = ['  "improved": "улучшенная версия промта"']
+    if options.generate_alternatives:
+        format_lines.append(
+            '  "alternatives": ["вариант 1", "вариант 2", "вариант 3"]'
+        )
+    if options.adapt_to_type:
+        hint = ADAPTATION_TYPE_HINTS.get(options.adaptation_type, "выбранный тип задачи")
+        format_lines.append(f'  "adapted": "одна адаптированная версия промта ({hint})"')
+
+    format_example = "{\n" + ",\n".join(format_lines) + "\n}"
+
+    requirements = [
+        "Верни только JSON без пояснений и markdown вне JSON-объекта.",
+        "Не добавляй лишний текст до или после JSON.",
+    ]
+    if options.generate_alternatives:
+        requirements.append("alternatives: ровно 2 или 3 переформулировки исходного промта.")
+    if options.adapt_to_type:
+        type_label = ADAPTATION_TYPE_LABELS.get(options.adaptation_type, options.adaptation_type)
+        requirements.append(
+            f"adapted: одна версия промта, адаптированная под тип «{type_label}»."
+        )
+
+    return "\n".join(
+        [
+            "Ты — ассистент по улучшению промтов для ChatList.",
+            "Сохраняй язык и смысл исходного промта.",
+            "",
+            "Задача для поля improved — сделать промт более конкретным и полезным:",
+            "- сохрани первоначальный смысл;",
+            "- добавь цель запроса;",
+            "- добавь необходимые подробности;",
+            "- укажи желаемый формат результата;",
+            "- не придумывай лишние сведения о пользователе.",
+            "",
+            "Пример: исходный «Как лучше планировать свой день?» → improved:",
+            "«Составь простой пошаговый план эффективной организации дня. "
+            "Объясни, как определить приоритетные задачи, распределить время на работу "
+            "и отдых, избежать перегрузки и вечером оценить результат. "
+            "Приведи пример дневного расписания.»",
+            "",
+            "Формат ответа:",
+            format_example,
+            "",
+            "Требования:",
+            *[f"- {item}" for item in requirements],
+        ]
     )
 
 
-def _build_stub_improvement_response(original_prompt: str) -> str:
+def _build_improvement_user_message(
+    original_prompt: str,
+    options: model_service.ImprovePromptOptions,
+) -> str:
+    lines = ["Улучши следующий промт."]
+    if options.generate_alternatives:
+        lines.append("Предложи 2–3 альтернативные переформулировки.")
+    if options.adapt_to_type:
+        type_label = ADAPTATION_TYPE_LABELS.get(
+            options.adaptation_type,
+            options.adaptation_type,
+        )
+        lines.append(f"Создай одну адаптированную версию для типа «{type_label}».")
+    lines.extend(["", f"Исходный промт:\n{original_prompt.strip()}"])
+    return "\n".join(lines)
+
+
+def _build_stub_improvement_response(
+    original_prompt: str,
+    options: model_service.ImprovePromptOptions,
+) -> str:
     preview = original_prompt.strip().replace("\n", " ")
     if len(preview) > 80:
         preview = preview[:80] + "..."
-    payload = {
-        "improved": f"Подробно и структурированно ответь на запрос: {preview}",
-        "alternatives": [
+
+    if "планировать" in original_prompt.lower() and "день" in original_prompt.lower():
+        improved = (
+            "Составь простой пошаговый план эффективной организации дня. "
+            "Объясни, как определить приоритетные задачи, распределить время на работу "
+            "и отдых, избежать перегрузки и вечером оценить результат. "
+            "Приведи пример дневного расписания."
+        )
+    else:
+        improved = (
+            f"Подробно и структурированно ответь на запрос. "
+            f"Укажи цель, необходимые детали и желаемый формат результата. "
+            f"Тема: {preview}"
+        )
+
+    payload: dict[str, object] = {"improved": improved}
+
+    if options.generate_alternatives:
+        payload["alternatives"] = [
             f"Дай развёрнутый ответ на тему: {preview}",
             f"Объясни по шагам: {preview}",
             f"Сформулируй практические рекомендации по теме: {preview}",
-        ],
-        "adaptations": {
-            "code": f"Напиши код и поясни решение для задачи: {preview}",
-            "analysis": f"Проведи анализ и сделай выводы по теме: {preview}",
-            "creative": f"Предложи креативные идеи по теме: {preview}",
-        },
-    }
+        ]
+
+    if options.adapt_to_type:
+        adaptation_templates = {
+            "code": (
+                f"Напиши программный код и поясни решение для задачи: {preview}. "
+                "Покажи пример реализации и объясни ключевые части."
+            ),
+            "analysis": (
+                f"Проведи подробный анализ темы: {preview}. "
+                "Сравни подходы, объясни причины и сформулируй выводы."
+            ),
+            "creative": (
+                f"Предложи творческие идеи и образный текст по теме: {preview}. "
+                "Сгенерируй несколько нестандартных вариантов."
+            ),
+        }
+        payload["adapted"] = adaptation_templates.get(
+            options.adaptation_type,
+            f"Адаптируй запрос под тип «{options.adaptation_type}»: {preview}",
+        )
+
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def improve_prompt(
     original_prompt: str,
     model: ModelRecord,
+    options: model_service.ImprovePromptOptions | None = None,
     timeout: float | None = None,
     use_stub: bool = STUB_MODE,
 ) -> RequestResult:
@@ -327,18 +413,21 @@ def improve_prompt(
             model_id=model.id,
         )
 
+    if options is None:
+        options = model_service.ImprovePromptOptions()
+
     if timeout is None:
         timeout = model_service.get_request_timeout()
 
     if use_stub:
         return RequestResult(
             model_name=model.name,
-            response_text=_build_stub_improvement_response(original_prompt),
+            response_text=_build_stub_improvement_response(original_prompt, options),
             success=True,
             model_id=model.id,
         )
 
-    combined_prompt = (
-        f"{PROMPT_ASSISTANT_SYSTEM}\n\n{_build_improvement_user_message(original_prompt)}"
-    )
+    system_prompt = _build_assistant_system_prompt(options)
+    user_message = _build_improvement_user_message(original_prompt, options)
+    combined_prompt = f"{system_prompt}\n\n{user_message}"
     return send_prompt_to_model(model, combined_prompt, timeout=timeout, use_stub=use_stub)

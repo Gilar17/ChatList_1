@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -838,21 +839,36 @@ class ImprovePromptWorker(QThread):
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, original_prompt: str, model: model_service.ModelRecord) -> None:
+    def __init__(
+        self,
+        original_prompt: str,
+        model: model_service.ModelRecord,
+        options: model_service.ImprovePromptOptions,
+    ) -> None:
         super().__init__()
         self.original_prompt = original_prompt
         self.model = model
+        self.options = options
 
     def run(self) -> None:
+        result: network.RequestResult | None = None
         try:
-            result = network.improve_prompt(self.original_prompt, self.model)
+            result = network.improve_prompt(
+                self.original_prompt,
+                self.model,
+                options=self.options,
+            )
             if not result.success:
                 self.failed.emit(result.response_text)
                 return
-            parsed = model_service.parse_prompt_assistant_response(result.response_text)
+            parsed = model_service.parse_prompt_assistant_response(
+                result.response_text,
+                expect_alternatives=self.options.generate_alternatives,
+                expect_adapted=self.options.adapt_to_type,
+            )
             self.finished.emit(parsed)
         except ValueError as exc:
-            raw_text = result.response_text if "result" in locals() else ""
+            raw_text = result.response_text if result is not None else ""
             message = str(exc)
             if raw_text:
                 message = f"{message}\n\nОтвет модели:\n{raw_text}"
@@ -862,11 +878,17 @@ class ImprovePromptWorker(QThread):
 
 
 class PromptImprovementDialog(QDialog):
-    ADAPTATION_LABELS = {
-        "code": "Код",
-        "analysis": "Анализ",
-        "creative": "Креатив",
-    }
+    ADAPTATION_TYPES = [
+        ("code", "Код"),
+        ("analysis", "Анализ"),
+        ("creative", "Творческий текст"),
+    ]
+    COMBO_MIN_HEIGHT = 30
+    OPTIONS_MIN_HEIGHT = 130
+    OPTIONS_MARGIN_H = 12
+    OPTIONS_MARGIN_V = 12
+    OPTIONS_ROW_SPACING = 10
+    OPTIONS_TO_MODEL_GAP = 6
 
     def __init__(self, original_prompt: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -875,53 +897,157 @@ class PromptImprovementDialog(QDialog):
         self._worker: ImprovePromptWorker | None = None
 
         self.setWindowTitle("Улучшение промта")
-        self.setMinimumSize(720, 640)
+        self.setMinimumSize(780, 850)
+        self.resize(820, 900)
 
         body_font = QFont("Segoe UI", 10)
         button_font = QFont("Segoe UI", 9)
+        combo_min_height = self.COMBO_MIN_HEIGHT
 
         self.original_input = QTextEdit()
         self.original_input.setFont(body_font)
         self.original_input.setReadOnly(True)
         self.original_input.setPlainText(self._original_prompt)
         self.original_input.setMinimumHeight(100)
+        self.original_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.original_input.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
 
         self.model_combo = QComboBox()
         self.model_combo.setFont(body_font)
-        self._populate_models()
-
-        self.improve_button = QPushButton("Улучшить")
-        self.improve_button.setFont(button_font)
-        self.improve_button.clicked.connect(self.on_improve)
-
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Модель:"))
-        model_row.addWidget(self.model_combo, stretch=1)
-        model_row.addWidget(self.improve_button)
+        self.model_combo.setMinimumHeight(combo_min_height)
+        self.model_combo.setFixedHeight(combo_min_height)
+        self.model_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
 
         self.status_label = QLabel("Выберите модель и нажмите «Улучшить».")
         self.status_label.setFont(QFont("Segoe UI", 9))
         self.status_label.setWordWrap(True)
+
+        self._populate_models()
+
+        self.improve_button = QPushButton("Улучшить")
+        self.improve_button.setFont(button_font)
+        self.improve_button.setMinimumHeight(combo_min_height)
+        self.improve_button.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.improve_button.clicked.connect(self.on_improve)
+
+        model_row = QHBoxLayout()
+        model_row.setSpacing(8)
+        model_row.addWidget(QLabel("Модель для улучшения:"))
+        model_row.addWidget(self.model_combo, stretch=1)
+        model_row.addWidget(self.improve_button)
+
+        model_row_container = QWidget()
+        model_row_layout = QVBoxLayout(model_row_container)
+        model_row_layout.setContentsMargins(0, self.OPTIONS_TO_MODEL_GAP, 0, 0)
+        model_row_layout.setSpacing(0)
+        model_row_layout.addLayout(model_row)
+
+        self.alternatives_checkbox = QCheckBox(
+            "Генерировать варианты переформулировки (2–3 шт.)"
+        )
+        self.alternatives_checkbox.setFont(body_font)
+        self.alternatives_checkbox.setMinimumHeight(26)
+        self.alternatives_checkbox.setChecked(True)
+        self.alternatives_checkbox.toggled.connect(self._update_options_visibility)
+
+        self.adaptation_checkbox = QCheckBox("Адаптировать под тип модели")
+        self.adaptation_checkbox.setFont(body_font)
+        self.adaptation_checkbox.setMinimumHeight(26)
+        self.adaptation_checkbox.setChecked(False)
+        self.adaptation_checkbox.toggled.connect(self._on_adaptation_toggled)
+
+        self.adaptation_type_combo = QComboBox()
+        self.adaptation_type_combo.setFont(body_font)
+        self.adaptation_type_combo.setMinimumHeight(combo_min_height)
+        self.adaptation_type_combo.setFixedHeight(combo_min_height)
+        self.adaptation_type_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        for type_key, type_label in self.ADAPTATION_TYPES:
+            self.adaptation_type_combo.addItem(type_label, type_key)
+        self.adaptation_type_combo.setEnabled(False)
+
+        self.adaptation_type_label = QLabel("Тип адаптации:")
+        self.adaptation_type_label.setFont(body_font)
+        self.adaptation_type_label.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        adaptation_type_row = QHBoxLayout()
+        adaptation_type_row.setSpacing(8)
+        adaptation_type_row.setContentsMargins(0, 0, 0, 0)
+        adaptation_type_row.addWidget(
+            self.adaptation_type_label,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+        adaptation_type_row.addWidget(
+            self.adaptation_type_combo,
+            stretch=1,
+            alignment=Qt.AlignmentFlag.AlignVCenter,
+        )
+
+        adaptation_type_row_widget = QWidget()
+        adaptation_type_row_widget.setFixedHeight(combo_min_height)
+        adaptation_type_row_widget.setLayout(adaptation_type_row)
+
+        options_group = QGroupBox("Опции")
+        options_group.setFont(body_font)
+        options_group.setFixedHeight(self.OPTIONS_MIN_HEIGHT)
+        options_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        options_layout = QVBoxLayout(options_group)
+        options_layout.setContentsMargins(
+            self.OPTIONS_MARGIN_H,
+            self.OPTIONS_MARGIN_V,
+            self.OPTIONS_MARGIN_H,
+            self.OPTIONS_MARGIN_V,
+        )
+        options_layout.setSpacing(self.OPTIONS_ROW_SPACING)
+        options_layout.addWidget(self.alternatives_checkbox)
+        options_layout.addWidget(self.adaptation_checkbox)
+        options_layout.addWidget(adaptation_type_row_widget)
 
         self.improved_input = QTextEdit()
         self.improved_input.setFont(body_font)
         self.improved_input.setReadOnly(True)
         self.improved_input.setPlaceholderText("Здесь появится улучшенный промт...")
         self.improved_input.setMinimumHeight(120)
+        self.improved_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.improved_input.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        self.alternatives_label = QLabel("Альтернативные варианты:")
+        self.alternatives_label.setFont(body_font)
 
         self.alternatives_list = QListWidget()
         self.alternatives_list.setFont(body_font)
         self.alternatives_list.setMinimumHeight(120)
         self.alternatives_list.currentItemChanged.connect(self._update_alternative_button)
 
-        self.adaptations_label = QLabel("Адаптации:")
-        self.adaptations_label.setFont(body_font)
-        self.adaptations_label.setVisible(False)
+        self.adapted_label = QLabel("Адаптированный промпт:")
+        self.adapted_label.setFont(body_font)
+        self.adapted_label.setVisible(False)
 
-        self.adaptations_list = QListWidget()
-        self.adaptations_list.setFont(body_font)
-        self.adaptations_list.setMinimumHeight(90)
-        self.adaptations_list.setVisible(False)
+        self.adapted_input = QTextEdit()
+        self.adapted_input.setFont(body_font)
+        self.adapted_input.setReadOnly(True)
+        self.adapted_input.setPlaceholderText("Здесь появится адаптированный промпт...")
+        self.adapted_input.setMinimumHeight(100)
+        self.adapted_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.adapted_input.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.adapted_input.setVisible(False)
 
         self.use_improved_button = QPushButton("Использовать улучшенный")
         self.use_improved_button.setFont(button_font)
@@ -933,13 +1059,21 @@ class PromptImprovementDialog(QDialog):
         self.use_alternative_button.setEnabled(False)
         self.use_alternative_button.clicked.connect(self.on_use_alternative)
 
+        self.use_adapted_button = QPushButton("Использовать адаптированный")
+        self.use_adapted_button.setFont(button_font)
+        self.use_adapted_button.setEnabled(False)
+        self.use_adapted_button.setVisible(False)
+        self.use_adapted_button.clicked.connect(self.on_use_adapted)
+
         self.close_button = QPushButton("Закрыть")
         self.close_button.setFont(button_font)
         self.close_button.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         buttons.addWidget(self.use_improved_button)
         buttons.addWidget(self.use_alternative_button)
+        buttons.addWidget(self.use_adapted_button)
         buttons.addStretch()
         buttons.addWidget(self.close_button)
 
@@ -948,15 +1082,18 @@ class PromptImprovementDialog(QDialog):
         layout.setSpacing(10)
         layout.addWidget(QLabel("Исходный промт:"))
         layout.addWidget(self.original_input)
-        layout.addLayout(model_row)
+        layout.addWidget(options_group)
+        layout.addWidget(model_row_container)
         layout.addWidget(self.status_label)
         layout.addWidget(QLabel("Улучшенный промт:"))
         layout.addWidget(self.improved_input)
-        layout.addWidget(QLabel("Альтернативные варианты:"))
+        layout.addWidget(self.alternatives_label)
         layout.addWidget(self.alternatives_list)
-        layout.addWidget(self.adaptations_label)
-        layout.addWidget(self.adaptations_list)
+        layout.addWidget(self.adapted_label)
+        layout.addWidget(self.adapted_input)
         layout.addLayout(buttons)
+
+        self._update_options_visibility()
 
     def applied_text(self) -> str | None:
         return self._applied_text
@@ -992,16 +1129,58 @@ class PromptImprovementDialog(QDialog):
         if model_id is not None:
             model_service.set_prompt_assistant_model_id(int(model_id))
 
+    def _build_options(self) -> model_service.ImprovePromptOptions:
+        adaptation_type = self.adaptation_type_combo.currentData()
+        return model_service.ImprovePromptOptions(
+            generate_alternatives=self.alternatives_checkbox.isChecked(),
+            adapt_to_type=self.adaptation_checkbox.isChecked(),
+            adaptation_type=str(adaptation_type or "code"),
+        )
+
+    def _update_options_visibility(self) -> None:
+        show_alternatives = self.alternatives_checkbox.isChecked()
+        self.alternatives_label.setVisible(show_alternatives)
+        self.alternatives_list.setVisible(show_alternatives)
+        if not show_alternatives:
+            self.alternatives_list.clear()
+            self.use_alternative_button.setEnabled(False)
+
+    def _on_adaptation_toggled(self, checked: bool) -> None:
+        self.adaptation_type_combo.setEnabled(checked)
+        self.adapted_label.setVisible(checked)
+        self.adapted_input.setVisible(checked)
+        self.use_adapted_button.setVisible(checked)
+        if not checked:
+            self.adapted_input.clear()
+            self.use_adapted_button.setEnabled(False)
+
     def _update_alternative_button(self) -> None:
-        has_selection = self.alternatives_list.currentItem() is not None
+        has_selection = (
+            self.alternatives_checkbox.isChecked()
+            and self.alternatives_list.currentItem() is not None
+        )
         self.use_alternative_button.setEnabled(has_selection)
 
     def _set_busy(self, busy: bool) -> None:
         self.improve_button.setEnabled(not busy and self.model_combo.isEnabled())
         self.model_combo.setEnabled(not busy and self.model_combo.count() > 0)
-        self.use_improved_button.setEnabled(not busy and bool(self.improved_input.toPlainText().strip()))
+        self.alternatives_checkbox.setEnabled(not busy)
+        self.adaptation_checkbox.setEnabled(not busy)
+        self.adaptation_type_combo.setEnabled(
+            not busy and self.adaptation_checkbox.isChecked()
+        )
+        self.use_improved_button.setEnabled(
+            not busy and bool(self.improved_input.toPlainText().strip())
+        )
         self.use_alternative_button.setEnabled(
-            not busy and self.alternatives_list.currentItem() is not None
+            not busy
+            and self.alternatives_checkbox.isChecked()
+            and self.alternatives_list.currentItem() is not None
+        )
+        self.use_adapted_button.setEnabled(
+            not busy
+            and self.adaptation_checkbox.isChecked()
+            and bool(self.adapted_input.toPlainText().strip())
         )
         self.close_button.setEnabled(not busy)
         if busy:
@@ -1036,11 +1215,10 @@ class PromptImprovementDialog(QDialog):
         self.status_label.setText(f"Отправка запроса в модель «{model.name}»...")
         self.improved_input.clear()
         self.alternatives_list.clear()
-        self.adaptations_list.clear()
-        self.adaptations_label.setVisible(False)
-        self.adaptations_list.setVisible(False)
+        self.adapted_input.clear()
 
-        self._worker = ImprovePromptWorker(self._original_prompt, model)
+        options = self._build_options()
+        self._worker = ImprovePromptWorker(self._original_prompt, model, options)
         self._worker.finished.connect(self.on_improve_finished)
         self._worker.failed.connect(self.on_improve_failed)
         self._worker.start()
@@ -1052,27 +1230,35 @@ class PromptImprovementDialog(QDialog):
             return
 
         self.improved_input.setPlainText(result.improved)
-        self.alternatives_list.clear()
-        for alternative in result.alternatives:
-            self.alternatives_list.addItem(alternative)
 
-        if result.adaptations:
-            self.adaptations_list.clear()
-            for key, value in result.adaptations.items():
-                label = self.ADAPTATION_LABELS.get(key, key)
-                self.adaptations_list.addItem(f"{label}: {value}")
-            self.adaptations_label.setVisible(True)
-            self.adaptations_list.setVisible(True)
+        self.alternatives_list.clear()
+        if self.alternatives_checkbox.isChecked():
+            for alternative in result.alternatives:
+                self.alternatives_list.addItem(alternative)
+
+        if self.adaptation_checkbox.isChecked():
+            self.adapted_input.setPlainText(result.adapted)
+        else:
+            self.adapted_input.clear()
 
         self.use_improved_button.setEnabled(True)
-        self.use_alternative_button.setEnabled(self.alternatives_list.count() > 0)
+        self._update_alternative_button()
         if self.alternatives_list.count() > 0:
             self.alternatives_list.setCurrentRow(0)
 
-        self._save_selected_model()
-        self.status_label.setText(
-            f"Готово. Получен улучшенный промт и {len(result.alternatives)} альтернатив."
+        self.use_adapted_button.setEnabled(
+            self.adaptation_checkbox.isChecked() and bool(result.adapted.strip())
         )
+
+        self._save_selected_model()
+
+        status_parts = ["Готово.", "Получен улучшенный промт"]
+        if self.alternatives_checkbox.isChecked() and result.alternatives:
+            status_parts.append(f"и {len(result.alternatives)} альтернатив")
+        if self.adaptation_checkbox.isChecked() and result.adapted.strip():
+            type_label = self.adaptation_type_combo.currentText()
+            status_parts.append(f"и адаптация «{type_label}»")
+        self.status_label.setText(" ".join(status_parts) + ".")
 
     def on_improve_failed(self, message: str) -> None:
         self._set_busy(False)
@@ -1095,25 +1281,36 @@ class PromptImprovementDialog(QDialog):
     def on_use_alternative(self) -> None:
         item = self.alternatives_list.currentItem()
         if item is None:
-            alternative_item = self.adaptations_list.currentItem()
-            if alternative_item is None:
-                QMessageBox.information(
-                    self,
-                    "Улучшение промта",
-                    "Выберите альтернативный вариант в списке.",
-                )
-                return
-            text = alternative_item.text()
-            if ": " in text:
-                text = text.split(": ", 1)[1]
-            self._applied_text = text.strip()
-        else:
-            self._applied_text = item.text().strip()
-
-        if not self._applied_text:
-            QMessageBox.information(self, "Улучшение промта", "Выберите альтернативный вариант в списке.")
+            QMessageBox.information(
+                self,
+                "Улучшение промта",
+                "Выберите альтернативный вариант в списке.",
+            )
             return
 
+        text = item.text().strip()
+        if not text:
+            QMessageBox.information(
+                self,
+                "Улучшение промта",
+                "Выберите альтернативный вариант в списке.",
+            )
+            return
+
+        self._applied_text = text
+        self._save_selected_model()
+        self.accept()
+
+    def on_use_adapted(self) -> None:
+        text = self.adapted_input.toPlainText().strip()
+        if not text:
+            QMessageBox.information(
+                self,
+                "Улучшение промта",
+                "Адаптированный промпт пока не получен.",
+            )
+            return
+        self._applied_text = text
         self._save_selected_model()
         self.accept()
 
