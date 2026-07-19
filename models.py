@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +16,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "db_path": "chatlist.db",
     "default_tags": "",
     "log_requests": "1",
+    "prompt_assistant_model_id": "",
 }
 
 DEFAULT_SEED_MODELS: list[dict[str, Any]] = [
@@ -158,6 +160,98 @@ def get_default_tags() -> str | None:
 
 def is_logging_enabled() -> bool:
     return get_setting_value("log_requests", "1") == "1"
+
+
+@dataclass
+class PromptAssistantResult:
+    improved: str
+    alternatives: list[str]
+    adaptations: dict[str, str]
+    raw_response: str | None = None
+
+
+def get_prompt_assistant_model_id() -> int | None:
+    value = get_setting_value("prompt_assistant_model_id", "").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def set_prompt_assistant_model_id(model_id: int | None) -> None:
+    set_setting_value("prompt_assistant_model_id", "" if model_id is None else str(model_id))
+
+
+def get_prompt_assistant_model() -> ModelRecord | None:
+    model_id = get_prompt_assistant_model_id()
+    if model_id is not None:
+        model = get_model_by_id(model_id)
+        if model is not None and model.is_active:
+            return model
+
+    active_models = load_active_models()
+    return active_models[0] if active_models else None
+
+
+def parse_prompt_assistant_response(text: str) -> PromptAssistantResult:
+    def normalize(data: dict[str, Any]) -> PromptAssistantResult:
+        improved = str(data.get("improved", "")).strip()
+        if not improved:
+            raise ValueError("В ответе отсутствует поле improved")
+
+        alternatives_raw = data.get("alternatives") or []
+        if not isinstance(alternatives_raw, list):
+            raise ValueError("Поле alternatives должно быть массивом")
+
+        alternatives = [str(item).strip() for item in alternatives_raw if str(item).strip()]
+        if len(alternatives) < 2:
+            raise ValueError("Ожидается минимум 2 альтернативных варианта")
+
+        adaptations_raw = data.get("adaptations") or {}
+        adaptations: dict[str, str] = {}
+        if isinstance(adaptations_raw, dict):
+            for key, value in adaptations_raw.items():
+                text_value = str(value).strip()
+                if text_value:
+                    adaptations[str(key)] = text_value
+
+        return PromptAssistantResult(
+            improved=improved,
+            alternatives=alternatives[:3],
+            adaptations=adaptations,
+            raw_response=text,
+        )
+
+    cleaned = text.strip()
+    candidates: list[str] = [cleaned]
+
+    code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if code_block:
+        candidates.insert(0, code_block.group(1).strip())
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start : end + 1])
+
+    last_error: ValueError | None = None
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = ValueError(f"Не удалось разобрать JSON: {exc}")
+            continue
+        if not isinstance(data, dict):
+            last_error = ValueError("Ответ ассистента должен быть JSON-объектом")
+            continue
+        try:
+            return normalize(data)
+        except ValueError as exc:
+            last_error = exc
+
+    raise last_error or ValueError("Не удалось разобрать ответ ассистента")
 
 
 def load_models() -> list[ModelRecord]:

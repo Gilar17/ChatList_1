@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 STUB_MODE = False
 LOG_FILE = "chatlist.log"
+OPENROUTER_DIAGNOSTICS = True
 
 logger = logging.getLogger("chatlist.network")
 
@@ -82,6 +84,27 @@ def _log_request(model_name: str, prompt: str, success: bool, details: str) -> N
     logger.info("%s | %s | %s | %s", status, model_name, preview, safe_details)
 
 
+def _print_openrouter_diagnostics(
+    endpoint: str,
+    model: ModelRecord,
+    api_key: str | None,
+    *,
+    http_status: int | None = None,
+    response_text: str | None = None,
+) -> None:
+    if not OPENROUTER_DIAGNOSTICS:
+        return
+
+    print("[OpenRouter] URL:", endpoint)
+    print("[OpenRouter] API ID:", model.api_id)
+    print("[OpenRouter] ключ задан:", "да" if api_key else "нет")
+    print("[OpenRouter] длина ключа:", len(api_key) if api_key else 0)
+    if http_status is not None:
+        print("[OpenRouter] HTTP-код:", http_status)
+    if response_text is not None:
+        print("[OpenRouter] ответ сервера:", response_text)
+
+
 def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> RequestResult:
     api_key = model_service.get_api_key(model.api_key_env_var)
     if not api_key:
@@ -104,8 +127,16 @@ def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> Request
     endpoint = model_service.get_api_endpoint(model)
 
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, trust_env=True) as client:
             response = client.post(endpoint, headers=headers, json=payload)
+            if response.status_code >= 400:
+                _print_openrouter_diagnostics(
+                    endpoint,
+                    model,
+                    api_key,
+                    http_status=response.status_code,
+                    response_text=response.text,
+                )
             response.raise_for_status()
             data = response.json()
             text = _parse_openai_response(data)
@@ -126,7 +157,15 @@ def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> Request
             model_id=model.id,
         )
     except httpx.HTTPStatusError as exc:
-        message = f"Ошибка HTTP {exc.response.status_code}: {_sanitize_log_text(exc.response.text[:200])}"
+        response_body = exc.response.text
+        message = f"Ошибка HTTP {exc.response.status_code}: {_sanitize_log_text(response_body)}"
+        _print_openrouter_diagnostics(
+            endpoint,
+            model,
+            api_key,
+            http_status=exc.response.status_code,
+            response_text=response_body,
+        )
         _log_request(model.name, prompt, False, message)
         return RequestResult(
             model_name=model.name,
@@ -221,3 +260,85 @@ def send_prompt_to_all(
 
     results.sort(key=lambda item: item.model_name.lower())
     return results
+
+
+PROMPT_ASSISTANT_SYSTEM = """
+Ты — ассистент по улучшению промтов для ChatList.
+Сохраняй язык и смысл исходного промта.
+Верни только JSON без пояснений и markdown вне JSON-объекта.
+
+Формат ответа:
+{
+  "improved": "улучшенная версия промта",
+  "alternatives": ["вариант 1", "вариант 2", "вариант 3"],
+  "adaptations": {
+    "code": "адаптация для задач программирования",
+    "analysis": "адаптация для анализа",
+    "creative": "адаптация для креативных задач"
+  }
+}
+
+Требования:
+- alternatives: ровно 2 или 3 переформулировки;
+- adaptations можно опустить, если не применимо;
+- не добавляй лишний текст до или после JSON.
+""".strip()
+
+
+def _build_improvement_user_message(original_prompt: str) -> str:
+    return (
+        "Улучши следующий промт и предложи альтернативные формулировки.\n\n"
+        f"Исходный промт:\n{original_prompt.strip()}"
+    )
+
+
+def _build_stub_improvement_response(original_prompt: str) -> str:
+    preview = original_prompt.strip().replace("\n", " ")
+    if len(preview) > 80:
+        preview = preview[:80] + "..."
+    payload = {
+        "improved": f"Подробно и структурированно ответь на запрос: {preview}",
+        "alternatives": [
+            f"Дай развёрнутый ответ на тему: {preview}",
+            f"Объясни по шагам: {preview}",
+            f"Сформулируй практические рекомендации по теме: {preview}",
+        ],
+        "adaptations": {
+            "code": f"Напиши код и поясни решение для задачи: {preview}",
+            "analysis": f"Проведи анализ и сделай выводы по теме: {preview}",
+            "creative": f"Предложи креативные идеи по теме: {preview}",
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def improve_prompt(
+    original_prompt: str,
+    model: ModelRecord,
+    timeout: float | None = None,
+    use_stub: bool = STUB_MODE,
+) -> RequestResult:
+    original_prompt = original_prompt.strip()
+    if not original_prompt:
+        return RequestResult(
+            model_name=model.name,
+            response_text="Ошибка: промт пустой",
+            success=False,
+            model_id=model.id,
+        )
+
+    if timeout is None:
+        timeout = model_service.get_request_timeout()
+
+    if use_stub:
+        return RequestResult(
+            model_name=model.name,
+            response_text=_build_stub_improvement_response(original_prompt),
+            success=True,
+            model_id=model.id,
+        )
+
+    combined_prompt = (
+        f"{PROMPT_ASSISTANT_SYSTEM}\n\n{_build_improvement_user_message(original_prompt)}"
+    )
+    return send_prompt_to_model(model, combined_prompt, timeout=timeout, use_stub=use_stub)

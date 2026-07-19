@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QObject, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QCursor, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -30,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 import models as model_service
+import network
 from markdown_viewer import format_received_at, show_response_markdown
 
 
@@ -831,6 +834,296 @@ class ResultsDialog(QDialog):
         self.reload()
 
 
+class ImprovePromptWorker(QThread):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, original_prompt: str, model: model_service.ModelRecord) -> None:
+        super().__init__()
+        self.original_prompt = original_prompt
+        self.model = model
+
+    def run(self) -> None:
+        try:
+            result = network.improve_prompt(self.original_prompt, self.model)
+            if not result.success:
+                self.failed.emit(result.response_text)
+                return
+            parsed = model_service.parse_prompt_assistant_response(result.response_text)
+            self.finished.emit(parsed)
+        except ValueError as exc:
+            raw_text = result.response_text if "result" in locals() else ""
+            message = str(exc)
+            if raw_text:
+                message = f"{message}\n\nОтвет модели:\n{raw_text}"
+            self.failed.emit(message)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class PromptImprovementDialog(QDialog):
+    ADAPTATION_LABELS = {
+        "code": "Код",
+        "analysis": "Анализ",
+        "creative": "Креатив",
+    }
+
+    def __init__(self, original_prompt: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._original_prompt = original_prompt.strip()
+        self._applied_text: str | None = None
+        self._worker: ImprovePromptWorker | None = None
+
+        self.setWindowTitle("Улучшение промта")
+        self.setMinimumSize(720, 640)
+
+        body_font = QFont("Segoe UI", 10)
+        button_font = QFont("Segoe UI", 9)
+
+        self.original_input = QTextEdit()
+        self.original_input.setFont(body_font)
+        self.original_input.setReadOnly(True)
+        self.original_input.setPlainText(self._original_prompt)
+        self.original_input.setMinimumHeight(100)
+
+        self.model_combo = QComboBox()
+        self.model_combo.setFont(body_font)
+        self._populate_models()
+
+        self.improve_button = QPushButton("Улучшить")
+        self.improve_button.setFont(button_font)
+        self.improve_button.clicked.connect(self.on_improve)
+
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Модель:"))
+        model_row.addWidget(self.model_combo, stretch=1)
+        model_row.addWidget(self.improve_button)
+
+        self.status_label = QLabel("Выберите модель и нажмите «Улучшить».")
+        self.status_label.setFont(QFont("Segoe UI", 9))
+        self.status_label.setWordWrap(True)
+
+        self.improved_input = QTextEdit()
+        self.improved_input.setFont(body_font)
+        self.improved_input.setReadOnly(True)
+        self.improved_input.setPlaceholderText("Здесь появится улучшенный промт...")
+        self.improved_input.setMinimumHeight(120)
+
+        self.alternatives_list = QListWidget()
+        self.alternatives_list.setFont(body_font)
+        self.alternatives_list.setMinimumHeight(120)
+        self.alternatives_list.currentItemChanged.connect(self._update_alternative_button)
+
+        self.adaptations_label = QLabel("Адаптации:")
+        self.adaptations_label.setFont(body_font)
+        self.adaptations_label.setVisible(False)
+
+        self.adaptations_list = QListWidget()
+        self.adaptations_list.setFont(body_font)
+        self.adaptations_list.setMinimumHeight(90)
+        self.adaptations_list.setVisible(False)
+
+        self.use_improved_button = QPushButton("Использовать улучшенный")
+        self.use_improved_button.setFont(button_font)
+        self.use_improved_button.setEnabled(False)
+        self.use_improved_button.clicked.connect(self.on_use_improved)
+
+        self.use_alternative_button = QPushButton("Использовать альтернативу")
+        self.use_alternative_button.setFont(button_font)
+        self.use_alternative_button.setEnabled(False)
+        self.use_alternative_button.clicked.connect(self.on_use_alternative)
+
+        self.close_button = QPushButton("Закрыть")
+        self.close_button.setFont(button_font)
+        self.close_button.clicked.connect(self.reject)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.use_improved_button)
+        buttons.addWidget(self.use_alternative_button)
+        buttons.addStretch()
+        buttons.addWidget(self.close_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("Исходный промт:"))
+        layout.addWidget(self.original_input)
+        layout.addLayout(model_row)
+        layout.addWidget(self.status_label)
+        layout.addWidget(QLabel("Улучшенный промт:"))
+        layout.addWidget(self.improved_input)
+        layout.addWidget(QLabel("Альтернативные варианты:"))
+        layout.addWidget(self.alternatives_list)
+        layout.addWidget(self.adaptations_label)
+        layout.addWidget(self.adaptations_list)
+        layout.addLayout(buttons)
+
+    def applied_text(self) -> str | None:
+        return self._applied_text
+
+    def _populate_models(self) -> None:
+        self.model_combo.clear()
+        active_models = model_service.load_active_models()
+        if not active_models:
+            self.model_combo.addItem("Нет активных моделей", None)
+            self.model_combo.setEnabled(False)
+            self.improve_button.setEnabled(False)
+            self.status_label.setText(
+                "Нет активных моделей. Добавьте или включите модели в меню «Модели»."
+            )
+            return
+
+        selected_index = 0
+        preferred_id = model_service.get_prompt_assistant_model_id()
+        for index, model in enumerate(active_models):
+            self.model_combo.addItem(model.name, model.id)
+            if preferred_id is not None and model.id == preferred_id:
+                selected_index = index
+        self.model_combo.setCurrentIndex(selected_index)
+
+    def _selected_model(self) -> model_service.ModelRecord | None:
+        model_id = self.model_combo.currentData()
+        if model_id is None:
+            return None
+        return model_service.get_model_by_id(int(model_id))
+
+    def _save_selected_model(self) -> None:
+        model_id = self.model_combo.currentData()
+        if model_id is not None:
+            model_service.set_prompt_assistant_model_id(int(model_id))
+
+    def _update_alternative_button(self) -> None:
+        has_selection = self.alternatives_list.currentItem() is not None
+        self.use_alternative_button.setEnabled(has_selection)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.improve_button.setEnabled(not busy and self.model_combo.isEnabled())
+        self.model_combo.setEnabled(not busy and self.model_combo.count() > 0)
+        self.use_improved_button.setEnabled(not busy and bool(self.improved_input.toPlainText().strip()))
+        self.use_alternative_button.setEnabled(
+            not busy and self.alternatives_list.currentItem() is not None
+        )
+        self.close_button.setEnabled(not busy)
+        if busy:
+            QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        else:
+            QApplication.restoreOverrideCursor()
+
+    def on_improve(self) -> None:
+        if not self._original_prompt:
+            QMessageBox.warning(self, "Улучшение промта", "Исходный промт пустой.")
+            return
+
+        model = self._selected_model()
+        if model is None:
+            QMessageBox.warning(
+                self,
+                "Улучшение промта",
+                "Выберите активную модель для улучшения промта.",
+            )
+            return
+
+        if not model_service.get_api_key(model.api_key_env_var):
+            QMessageBox.warning(
+                self,
+                "Улучшение промта",
+                f"Не задан API-ключ ({model.api_key_env_var}).\n"
+                "Добавьте ключ в файл .env и перезапустите программу.",
+            )
+            return
+
+        self._set_busy(True)
+        self.status_label.setText(f"Отправка запроса в модель «{model.name}»...")
+        self.improved_input.clear()
+        self.alternatives_list.clear()
+        self.adaptations_list.clear()
+        self.adaptations_label.setVisible(False)
+        self.adaptations_list.setVisible(False)
+
+        self._worker = ImprovePromptWorker(self._original_prompt, model)
+        self._worker.finished.connect(self.on_improve_finished)
+        self._worker.failed.connect(self.on_improve_failed)
+        self._worker.start()
+
+    def on_improve_finished(self, result: object) -> None:
+        self._set_busy(False)
+        if not isinstance(result, model_service.PromptAssistantResult):
+            self.status_label.setText("Получен некорректный ответ ассистента.")
+            return
+
+        self.improved_input.setPlainText(result.improved)
+        self.alternatives_list.clear()
+        for alternative in result.alternatives:
+            self.alternatives_list.addItem(alternative)
+
+        if result.adaptations:
+            self.adaptations_list.clear()
+            for key, value in result.adaptations.items():
+                label = self.ADAPTATION_LABELS.get(key, key)
+                self.adaptations_list.addItem(f"{label}: {value}")
+            self.adaptations_label.setVisible(True)
+            self.adaptations_list.setVisible(True)
+
+        self.use_improved_button.setEnabled(True)
+        self.use_alternative_button.setEnabled(self.alternatives_list.count() > 0)
+        if self.alternatives_list.count() > 0:
+            self.alternatives_list.setCurrentRow(0)
+
+        self._save_selected_model()
+        self.status_label.setText(
+            f"Готово. Получен улучшенный промт и {len(result.alternatives)} альтернатив."
+        )
+
+    def on_improve_failed(self, message: str) -> None:
+        self._set_busy(False)
+        self.status_label.setText("Не удалось улучшить промт.")
+        QMessageBox.critical(
+            self,
+            "Улучшение промта",
+            f"Не удалось получить улучшенный промт.\n\n{message}",
+        )
+
+    def on_use_improved(self) -> None:
+        text = self.improved_input.toPlainText().strip()
+        if not text:
+            QMessageBox.information(self, "Улучшение промта", "Улучшенный промт пока не получен.")
+            return
+        self._applied_text = text
+        self._save_selected_model()
+        self.accept()
+
+    def on_use_alternative(self) -> None:
+        item = self.alternatives_list.currentItem()
+        if item is None:
+            alternative_item = self.adaptations_list.currentItem()
+            if alternative_item is None:
+                QMessageBox.information(
+                    self,
+                    "Улучшение промта",
+                    "Выберите альтернативный вариант в списке.",
+                )
+                return
+            text = alternative_item.text()
+            if ": " in text:
+                text = text.split(": ", 1)[1]
+            self._applied_text = text.strip()
+        else:
+            self._applied_text = item.text().strip()
+
+        if not self._applied_text:
+            QMessageBox.information(self, "Улучшение промта", "Выберите альтернативный вариант в списке.")
+            return
+
+        self._save_selected_model()
+        self.accept()
+
+    def closeEvent(self, event) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -846,10 +1139,14 @@ class SettingsDialog(QDialog):
         self.log_checkbox = QCheckBox("Записывать историю запросов в файл chatlist.log")
         self.log_checkbox.setChecked(model_service.is_logging_enabled())
 
+        self.assistant_model_combo = QComboBox()
+        self._populate_assistant_models()
+
         form = QFormLayout()
         form.addRow("Время ожидания ответа, сек.:", self.timeout_input)
         form.addRow("Файл базы данных:", self.db_path_input)
         form.addRow("Теги по умолчанию:", self.default_tags_input)
+        form.addRow("Модель для улучшения промта:", self.assistant_model_combo)
         form.addRow("", self.log_checkbox)
 
         buttons = QDialogButtonBox()
@@ -862,9 +1159,24 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+    def _populate_assistant_models(self) -> None:
+        self.assistant_model_combo.clear()
+        self.assistant_model_combo.addItem("Первая активная модель", None)
+
+        selected_index = 0
+        preferred_id = model_service.get_prompt_assistant_model_id()
+        for index, model in enumerate(model_service.load_active_models(), start=1):
+            self.assistant_model_combo.addItem(model.name, model.id)
+            if preferred_id is not None and model.id == preferred_id:
+                selected_index = index
+        self.assistant_model_combo.setCurrentIndex(selected_index)
+
     def save(self) -> None:
         model_service.set_setting_value("request_timeout", str(self.timeout_input.value()))
         model_service.set_setting_value("db_path", self.db_path_input.text().strip() or "chatlist.db")
         model_service.set_setting_value("default_tags", self.default_tags_input.text().strip())
         model_service.set_setting_value("log_requests", "1" if self.log_checkbox.isChecked() else "0")
+
+        model_id = self.assistant_model_combo.currentData()
+        model_service.set_prompt_assistant_model_id(int(model_id) if model_id is not None else None)
         self.accept()

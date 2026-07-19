@@ -29,7 +29,13 @@ from PyQt6.QtWidgets import (
 import db
 import models as model_service
 import network
-from dialogs import ModelsDialog, PromptsDialog, ResultsDialog, SettingsDialog
+from dialogs import (
+    ModelsDialog,
+    PromptImprovementDialog,
+    PromptsDialog,
+    ResultsDialog,
+    SettingsDialog,
+)
 from markdown_viewer import format_received_at, show_response_markdown
 
 
@@ -127,10 +133,16 @@ class MainWindow(QMainWindow):
         self.send_button.setFixedWidth(120)
         self.send_button.clicked.connect(self.on_send)
 
+        self.improve_prompt_button = QPushButton("Улучшить промт")
+        self.improve_prompt_button.setFont(button_font)
+        self.improve_prompt_button.setFixedWidth(140)
+        self.improve_prompt_button.clicked.connect(self.on_improve_prompt)
+
         prompt_row = QHBoxLayout()
         prompt_row.setSpacing(8)
         prompt_row.addWidget(prompt_caption)
         prompt_row.addWidget(self.prompt_combo, stretch=1)
+        prompt_row.addWidget(self.improve_prompt_button)
         prompt_row.addWidget(self.send_button)
 
         self.prompt_input = QTextEdit()
@@ -224,6 +236,26 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
         dialog.exec()
+
+    def on_improve_prompt(self) -> None:
+        prompt = self.prompt_input.toPlainText().strip()
+        if not prompt:
+            QMessageBox.warning(self, "ChatList", "Введите текст промта.")
+            return
+
+        dialog = PromptImprovementDialog(prompt, self)
+        if dialog.exec() != PromptImprovementDialog.DialogCode.Accepted:
+            return
+
+        applied_text = dialog.applied_text()
+        if not applied_text:
+            return
+
+        self._loading_prompt = True
+        self.prompt_input.setPlainText(applied_text)
+        self._loading_prompt = False
+        self._current_prompt_id = None
+        self.status_label.setText("Выбранный вариант промта подставлен в поле ввода.")
 
     def load_prompt_list(self) -> None:
         self.prompt_combo.blockSignals(True)
