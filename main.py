@@ -5,9 +5,10 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont
+from PyQt6.QtGui import QCursor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,6 +38,17 @@ from dialogs import (
     SettingsDialog,
 )
 from markdown_viewer import format_received_at, show_response_markdown
+
+APP_ICON_PATH = Path(__file__).resolve().parent / "app.ico"
+
+
+def load_app_icon() -> QIcon:
+    """Загружает app.ico из папки проекта; при отсутствии файла возвращает пустую иконку."""
+    if APP_ICON_PATH.is_file():
+        icon = QIcon(str(APP_ICON_PATH))
+        if not icon.isNull():
+            return icon
+    return QIcon()
 
 
 @dataclass
@@ -113,6 +125,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ChatList — Сравнение ответов нейросетей")
         self.setMinimumSize(700, 500)
         self.resize(950, 650)
+
+        app_icon = load_app_icon()
+        if not app_icon.isNull():
+            self.setWindowIcon(app_icon)
 
         self._create_menu()
 
@@ -532,6 +548,10 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setStyle("Windows11" if "Windows11" in QStyleFactory.keys() else "Fusion")
+
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
 
     window = MainWindow()
     window.show()
