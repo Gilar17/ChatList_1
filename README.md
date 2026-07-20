@@ -81,11 +81,23 @@ python db.py
 ## Сборка exe (PyInstaller)
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install pyinstaller
-.\.venv\Scripts\pyinstaller.exe --onefile --noconsole --name ChatList --collect-all PyQt6 main.py
+.\venv\Scripts\python.exe -m pip install pyinstaller
+.\venv\Scripts\python.exe build.py
 ```
 
-Готовый файл: `C:\Work\ChatList_1\dist\ChatList.exe`
+Готовый файл: `dist\ChatList.exe`
+
+## Сборка установщика (Inno Setup)
+
+```powershell
+.\venv\Scripts\python.exe -m pip install pyinstaller
+.\venv\Scripts\python.exe build_installer.py
+```
+
+Скрипт собирает `dist\ChatList.exe`, затем создаёт установщик в папке `install\`.
+Имя установщика берётся из `version.py`, например: `install\ChatList-1.0.0-Setup.exe`.
+
+Требуется [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 
 ## Файлы данных
 

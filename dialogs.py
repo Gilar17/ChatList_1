@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 import models as model_service
 import network
 import appearance
+from version import __version__
 from markdown_viewer import format_received_at, show_response_markdown
 
 
@@ -1454,7 +1455,7 @@ class AboutDialog(QDialog):
         )
         self.title_label.setTextInteractionFlags(selectable)
 
-        self.version_label = QLabel("Версия 1.0.0")
+        self.version_label = QLabel(f"Версия {__version__}")
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.version_label.setTextInteractionFlags(selectable)
 

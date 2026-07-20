@@ -13,6 +13,8 @@ import httpx
 
 import models as model_service
 
+from version import __version__
+
 if TYPE_CHECKING:
     from models import ModelRecord
 
@@ -46,6 +48,7 @@ def setup_logging() -> None:
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+    logger.info("ChatList %s — журнал запросов запущен", __version__)
 
 
 @dataclass
