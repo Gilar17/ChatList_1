@@ -111,7 +111,7 @@ def _print_openrouter_diagnostics(
 def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> RequestResult:
     api_key = model_service.get_api_key(model.api_key_env_var)
     if not api_key:
-        message = f"Ошибка: не задан API-ключ ({model.api_key_env_var})"
+        message = model_service.get_missing_api_key_message(model.api_key_env_var)
         _log_request(model.name, prompt, False, message)
         return RequestResult(
             model_name=model.name,
@@ -185,6 +185,35 @@ def _send_openrouter(model: ModelRecord, prompt: str, timeout: float) -> Request
             success=False,
             model_id=model.id,
         )
+
+
+def test_openrouter_connection(api_key: str | None = None) -> tuple[bool, str]:
+    key = (api_key or model_service.get_api_key("OPENROUTER_API_KEY") or "").strip()
+    if not key:
+        return False, model_service.get_missing_api_key_message()
+
+    endpoint = f"{model_service.get_openrouter_base_url()}/models"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "HTTP-Referer": "https://github.com/ChatList",
+        "X-Title": "ChatList",
+    }
+
+    try:
+        with httpx.Client(timeout=30.0, trust_env=True) as client:
+            response = client.get(endpoint, headers=headers)
+            if response.status_code == 200:
+                return True, "Подключение успешно"
+            if response.status_code == 401:
+                return False, "Ошибка авторизации: ключ недействителен или отозван."
+            if response.status_code == 403:
+                return False, "Доступ запрещён: проверьте права API-ключа."
+            body = _sanitize_log_text(response.text[:500])
+            return False, f"Ошибка HTTP {response.status_code}: {body}"
+    except httpx.TimeoutException:
+        return False, "Превышено время ожидания ответа сервера OpenRouter."
+    except httpx.RequestError as exc:
+        return False, f"Ошибка сети: {_sanitize_log_text(str(exc))}"
 
 
 def _send_stub(model: ModelRecord, prompt: str) -> RequestResult:

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import api_keys
 import db
 from dotenv import load_dotenv
 
@@ -113,7 +114,8 @@ class ResultRecord:
 
 
 def init_environment() -> None:
-    load_dotenv()
+    if api_keys.is_development_mode():
+        load_dotenv()
 
 
 def get_openrouter_base_url() -> str:
@@ -125,7 +127,29 @@ def get_openrouter_endpoint() -> str:
 
 
 def get_api_key(api_key_env_var: str = "OPENROUTER_API_KEY") -> str | None:
+    if api_key_env_var == api_keys.OPENROUTER_ENV_VAR:
+        return api_keys.get_openrouter_api_key()
     return os.getenv(api_key_env_var)
+
+
+def get_missing_api_key_message(api_key_env_var: str = "OPENROUTER_API_KEY") -> str:
+    return api_keys.get_missing_api_key_message(api_key_env_var)
+
+
+def has_openrouter_api_key() -> bool:
+    return api_keys.has_openrouter_api_key()
+
+
+def save_openrouter_api_key(api_key: str) -> None:
+    api_keys.save_openrouter_api_key(api_key)
+
+
+def delete_openrouter_api_key() -> None:
+    api_keys.delete_openrouter_api_key()
+
+
+def mask_api_key(key: str) -> str:
+    return api_keys.mask_api_key(key)
 
 
 def get_api_endpoint(model: ModelRecord) -> str:

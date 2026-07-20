@@ -27,6 +27,8 @@ def build_exe(python_executable: str | None = None) -> Path:
         "--name=ChatList",
         "--collect-all",
         "PyQt6",
+        "--hidden-import=keyring.backends.Windows",
+        "--collect-submodules=keyring.backends",
     ]
     if icon_path.is_file():
         command.append(f"--icon={icon_path}")

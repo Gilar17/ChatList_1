@@ -1,7 +1,7 @@
 ; Автоматически сгенерировано build_installer.py из version.py
 
 #define MyAppName "ChatList"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "ChatList"
 #define MyAppExeName "ChatList.exe"
 
@@ -27,8 +27,8 @@ UninstallDisplayIcon={app}\ChatList.exe
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 CreateUninstallRegKey=yes
 Uninstallable=yes
-VersionInfoVersion=1.0.0.0
-VersionInfoProductVersion=1.0.0.0
+VersionInfoVersion=1.0.1.0
+VersionInfoProductVersion=1.0.1.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=Установщик {#MyAppName}
 VersionInfoProductName={#MyAppName}

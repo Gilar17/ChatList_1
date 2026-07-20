@@ -1218,8 +1218,7 @@ class PromptImprovementDialog(QDialog):
             QMessageBox.warning(
                 self,
                 "Улучшение промта",
-                f"Не задан API-ключ ({model.api_key_env_var}).\n"
-                "Добавьте ключ в файл .env и перезапустите программу.",
+                model_service.get_missing_api_key_message(model.api_key_env_var),
             )
             return
 
@@ -1333,13 +1332,26 @@ class PromptImprovementDialog(QDialog):
         super().closeEvent(event)
 
 
+class TestOpenRouterWorker(QThread):
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, api_key: str | None = None) -> None:
+        super().__init__()
+        self.api_key = api_key
+
+    def run(self) -> None:
+        success, message = network.test_openrouter_connection(self.api_key)
+        self.finished.emit(success, message)
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Настройки")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(480)
         self._applied_theme = model_service.get_theme()
         self._applied_font_size = model_service.get_font_size()
+        self._test_worker: TestOpenRouterWorker | None = None
 
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Светлая", "light")
@@ -1373,6 +1385,42 @@ class SettingsDialog(QDialog):
         form.addRow("Модель для улучшения промта:", self.assistant_model_combo)
         form.addRow("", self.log_checkbox)
 
+        openrouter_group = QGroupBox("OpenRouter API")
+        openrouter_layout = QVBoxLayout(openrouter_group)
+
+        key_row = QHBoxLayout()
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_input.setPlaceholderText("Введите новый API-ключ")
+        self.show_key_button = QPushButton("Показать")
+        self.show_key_button.setCheckable(True)
+        self.show_key_button.toggled.connect(self._toggle_key_visibility)
+        key_row.addWidget(self.api_key_input)
+        key_row.addWidget(self.show_key_button)
+
+        self.api_key_status_label = QLabel()
+        self.api_key_message_label = QLabel()
+        self.api_key_message_label.setWordWrap(True)
+
+        api_buttons_row = QHBoxLayout()
+        self.save_key_button = QPushButton("Сохранить ключ")
+        self.delete_key_button = QPushButton("Удалить ключ")
+        self.test_connection_button = QPushButton("Проверить подключение")
+        api_buttons_row.addWidget(self.save_key_button)
+        api_buttons_row.addWidget(self.delete_key_button)
+        api_buttons_row.addWidget(self.test_connection_button)
+
+        openrouter_layout.addWidget(QLabel("API-ключ OpenRouter:"))
+        openrouter_layout.addLayout(key_row)
+        openrouter_layout.addWidget(self.api_key_status_label)
+        openrouter_layout.addLayout(api_buttons_row)
+        openrouter_layout.addWidget(self.api_key_message_label)
+
+        self.save_key_button.clicked.connect(self._save_api_key)
+        self.delete_key_button.clicked.connect(self._delete_api_key)
+        self.test_connection_button.clicked.connect(self._test_connection)
+        self._refresh_api_key_status()
+
         buttons = QDialogButtonBox()
         save_button = buttons.addButton("Сохранить", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_button = buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
@@ -1381,8 +1429,86 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(openrouter_group)
         layout.addWidget(buttons)
         _apply_dialog_appearance(self)
+
+    def _toggle_key_visibility(self, visible: bool) -> None:
+        self.api_key_input.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+        self.show_key_button.setText("Скрыть" if visible else "Показать")
+
+    def _refresh_api_key_status(self) -> None:
+        if model_service.has_openrouter_api_key():
+            key = model_service.get_api_key("OPENROUTER_API_KEY") or ""
+            self.api_key_status_label.setText(
+                f"Сохранён ключ: {model_service.mask_api_key(key)}"
+            )
+            self.delete_key_button.setEnabled(True)
+        else:
+            self.api_key_status_label.setText("Ключ не сохранён")
+            self.delete_key_button.setEnabled(False)
+
+    def _set_api_key_busy(self, busy: bool) -> None:
+        self.save_key_button.setEnabled(not busy)
+        self.delete_key_button.setEnabled(not busy and model_service.has_openrouter_api_key())
+        self.test_connection_button.setEnabled(not busy)
+
+    def _save_api_key(self) -> None:
+        key = self.api_key_input.text().strip()
+        if not key:
+            QMessageBox.warning(self, "OpenRouter API", "Введите API-ключ для сохранения.")
+            return
+        try:
+            model_service.save_openrouter_api_key(key)
+        except (ValueError, RuntimeError) as exc:
+            QMessageBox.critical(self, "OpenRouter API", str(exc))
+            return
+
+        self.api_key_input.clear()
+        self.show_key_button.setChecked(False)
+        self._toggle_key_visibility(False)
+        self._refresh_api_key_status()
+        self.api_key_message_label.setStyleSheet("color: #2e7d32;")
+        self.api_key_message_label.setText("Ключ сохранён в Windows Credential Manager.")
+
+    def _delete_api_key(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "OpenRouter API",
+            "Удалить сохранённый API-ключ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        model_service.delete_openrouter_api_key()
+        self.api_key_input.clear()
+        self._refresh_api_key_status()
+        self.api_key_message_label.setStyleSheet("")
+        self.api_key_message_label.setText("Ключ удалён.")
+
+    def _test_connection(self) -> None:
+        entered_key = self.api_key_input.text().strip()
+        api_key = entered_key or None
+        self._set_api_key_busy(True)
+        self.api_key_message_label.setStyleSheet("")
+        self.api_key_message_label.setText("Проверка подключения...")
+        self._test_worker = TestOpenRouterWorker(api_key)
+        self._test_worker.finished.connect(self._on_test_connection_finished)
+        self._test_worker.start()
+
+    def _on_test_connection_finished(self, success: bool, message: str) -> None:
+        self._set_api_key_busy(False)
+        self.api_key_message_label.setText(message)
+        self.api_key_message_label.setStyleSheet("color: #2e7d32;" if success else "color: #c62828;")
+
+    def closeEvent(self, event) -> None:
+        if self._test_worker is not None and self._test_worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _populate_assistant_models(self) -> None:
         self.assistant_model_combo.clear()
