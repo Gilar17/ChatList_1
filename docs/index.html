@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ChatList — сравнение ответов нейросетей</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="container header__inner">
+        <div class="brand">
+          <div class="brand__title">ChatList</div>
+          <div class="brand__version">Версия 1.0.0</div>
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="card">
+        <h2>ChatList</h2>
+        <p class="lead">
+          ChatList — это приложение на Python для отправки одного промпта в
+          несколько нейросетей через OpenRouter и сравнения полученных ответов.
+        </p>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h3>Основные возможности</h3>
+          <ul class="list">
+            <li>Отправка промпта нескольким моделям одновременно</li>
+            <li>Сравнение и сохранение результатов</li>
+            <li>Управление промтами и моделями</li>
+            <li>AI-ассистент для улучшения промптов</li>
+            <li>Создание альтернативных и адаптированных вариантов промпта</li>
+            <li>Экспорт результатов в Markdown и JSON</li>
+            <li>Настройка темы и размера шрифта</li>
+          </ul>
+        </div>
+
+        <div class="card">
+          <h3>Используемые технологии</h3>
+          <ul class="list">
+            <li>Python</li>
+            <li>PyQt6</li>
+            <li>SQLite</li>
+            <li>OpenRouter API</li>
+          </ul>
+
+          <h3 class="mt">Системные требования</h3>
+          <ul class="list">
+            <li>Windows 10 или Windows 11</li>
+            <li>Админ-права не требуются (можно установить в пользовательскую директорию)</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="card">
+        <h3>Установка</h3>
+        <ol class="list--ol">
+          <li>
+            Перейдите на страницу релиза:
+            <a
+              href="https://github.com/Gilar17/ChatList_1/releases/latest"
+              target="_blank"
+              rel="noopener"
+              >последний GitHub Release</a
+            >.
+          </li>
+          <li>Скачайте файл <strong>ChatList-1.0.0-Setup.exe</strong>.</li>
+          <li>Запустите установщик и следуйте инструкциям мастера.</li>
+        </ol>
+
+        <div class="cta">
+          <a
+            class="button"
+            href="https://github.com/Gilar17/ChatList_1/releases/latest"
+            target="_blank"
+            rel="noopener"
+            >Скачать последнюю версию</a
+          >
+        </div>
+      </section>
+
+      <section class="card warning">
+        <h3>Важное про OpenRouter API-ключ</h3>
+        <p>
+          Для работы AI-ассистента и генерации ответов ChatList использует
+          OpenRouter API. Нужен собственный API-ключ.
+        </p>
+        <p class="warning__bold">
+          Пожалуйста, не публикуйте ваш OPENROUTER_API_KEY в GitHub.
+        </p>
+        <p>
+          Ключ хранится локально в файле <code>.env</code> (создаётся по примеру
+          <code>.env.example</code>) и не должен попадать в репозиторий.
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="container footer__inner">
+        <span class="muted">© ChatList, 1.0.0</span>
+        <span class="muted">
+          Исходный код:
+          <a
+            class="link"
+            href="https://github.com/Gilar17/ChatList_1"
+            target="_blank"
+            rel="noopener"
+            >GitHub</a
+          >
+        </span>
+      </div>
+    </footer>
+  </body>
+</html>
+
